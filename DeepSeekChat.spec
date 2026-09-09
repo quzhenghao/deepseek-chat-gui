@@ -1,5 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(SPECPATH)))
+from app import __version__  # noqa: E402
+
 
 hiddenimports = [
     "PySide6.QtWebEngineCore",
@@ -56,8 +62,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "DeepSeek Chat",
         "CFBundleDisplayName": "DeepSeek Chat",
-        "CFBundleShortVersionString": "2.0.0",
-        "CFBundleVersion": "2.0.0",
+        "CFBundleShortVersionString": __version__,
+        "CFBundleVersion": __version__,
         "CFBundleIconFile": "app-icon.icns",
         "NSHighResolutionCapable": True,
     },

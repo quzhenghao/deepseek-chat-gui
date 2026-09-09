@@ -23,7 +23,7 @@ from app import __version__
 print(__version__)
 PY
 )"
-TAG="v${VERSION}"
+TAG="${RELEASE_TAG:-v${VERSION}}"
 DMG="$ROOT_DIR/release/DeepSeek-Chat-${VERSION}-macos-$(uname -m).dmg"
 
 if [ ! -f "$DMG" ]; then

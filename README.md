@@ -8,6 +8,13 @@
 
 本项目是非官方客户端，与 DeepSeek 官方无隶属或背书关系。
 
+<p align="center">
+  <a href="https://github.com/quzhenghao/deepseek-chat-gui/releases"><img src="https://img.shields.io/badge/下载-v0.1-4B7BF5?logo=github" alt="下载"></a>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/PySide6-6.11-41CD52" alt="PySide6">
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-black" alt="macOS">
+</p>
+
 ## 功能
 
 - 使用自己的 API 密钥直接请求 `https://api.deepseek.com`
@@ -40,6 +47,13 @@
 V4.1 Flash 是限时内测模型，模型 ID 已注明于 9 月 10 日到期。它目前可能不会出现在 `/models` 返回值中，因此客户端连接官方 DeepSeek API 并同步模型时会额外保留这一条；是否开放及实际停止时间仍以账号调用结果为准。
 
 DeepSeek 当前接受 `low`、`high`、`max` 三档思考强度，客户端界面使用对应的英文名称 `Low`、`High`、`Max`。
+
+## 下载与安装（macOS）
+
+从 [Releases](https://github.com/quzhenghao/deepseek-chat-gui/releases) 下载最新的
+`DeepSeek-Chat-0.1.0-macos-arm64.dmg`，打开镜像后把 `DeepSeek Chat` 拖入
+“应用程序”即可完成安装。安装包当前为本地 ad-hoc 签名；首次打开若提示
+“无法验证开发者”，请右键点击应用并选择“打开”，或在“系统设置 → 隐私与安全性”中允许打开。
 
 ## 使用现有 Conda 环境运行
 

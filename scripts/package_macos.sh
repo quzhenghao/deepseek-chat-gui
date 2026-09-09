@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${DEEPSEEK_PYTHON:-/opt/anaconda3/envs/deepseek-chat/bin/python}"
 APP_NAME="DeepSeek Chat"
 
+cd "$ROOT_DIR"
+
 VERSION="$("$PYTHON_BIN" - "$ROOT_DIR" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
