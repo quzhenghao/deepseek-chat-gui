@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.tmp/
+.DS_Store
+.idea/
+.ruff_cache/
+build/
+dist/
+release/
+*.dmg
+*.log
