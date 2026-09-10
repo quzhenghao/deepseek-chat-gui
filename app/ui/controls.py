@@ -7,7 +7,6 @@ from PySide6.QtGui import QHelpEvent, QPainterPath, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QGraphicsDropShadowEffect,
     QDoubleSpinBox,
     QDialog,
     QFrame,
@@ -221,7 +220,7 @@ class ConfirmationDialog(QDialog):
         self.setMinimumHeight(290)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 28)
+        root.setContentsMargins(0, 0, 0, 0)
 
         self.card = QFrame(self)
         self.card.setObjectName("confirmationCard")
@@ -282,10 +281,6 @@ class ConfirmationDialog(QDialog):
         button_row.addStretch()
         card_layout.addLayout(button_row)
 
-        self._shadow = QGraphicsDropShadowEffect(self.card)
-        self._shadow.setBlurRadius(34)
-        self._shadow.setOffset(0, 8)
-        self.card.setGraphicsEffect(self._shadow)
         self.apply_theme(theme)
         self.adjustSize()
 
@@ -397,7 +392,6 @@ QPushButton#confirmationYesBtn:pressed {{
         self.question_badge.setPixmap(
             icon("question", palette["accent"], 28).pixmap(28, 28)
         )
-        self._shadow.setColor(palette["shadow"])
 
 
 class NoticeDialog(QDialog):

@@ -12,7 +12,7 @@ os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QHelpEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from app import ASSETS_DIR
 from app.config import (
@@ -36,10 +36,15 @@ from app.ui.controls import (
     RoundedComboBox,
     RoundedMenu,
 )
-from app.ui.main_window import MainWindow
+from app.ui.main_window import ChatTextEdit, MainWindow
 from app.ui.message_bubbles import ChatView, ThinkingIndicator
 from app.ui.sidebar import ProductModeSelector
-from app.ui.theme import SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, colors
+from app.ui.theme import (
+    SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+    build_qss,
+    colors,
+)
 
 
 class MemoryStore:
@@ -428,11 +433,40 @@ class UITests(unittest.TestCase):
         self.assertIn("border-radius: 16px", dialog.card.styleSheet())
         self.assertIn("border-radius: 10px", dialog.card.styleSheet())
         self.assertIn("background: #FFF1F0", dialog.card.styleSheet())
+        margins = dialog.layout().contentsMargins()
+        self.assertEqual(
+            (margins.left(), margins.top(), margins.right(), margins.bottom()),
+            (0, 0, 0, 0),
+        )
+        self.assertEqual(dialog.card.geometry(), dialog.rect())
+        self.assertIsNone(dialog.card.graphicsEffect())
 
         dialog.apply_theme("dark")
         self.assertIn("background: #3A2426", dialog.card.styleSheet())
         dialog.close()
         dialog.deleteLater()
+
+    def test_chat_composer_input_paints_the_card_surface(self) -> None:
+        for theme in ("light", "dark"):
+            rule = (
+                build_qss(theme)
+                .split("QTextEdit#chatInput {", 1)[1]
+                .split("}", 1)[0]
+            )
+            self.assertIn(f"background: {colors(theme)['panel']};", rule)
+
+        host = QWidget()
+        host.setStyleSheet(build_qss("light"))
+        editor = ChatTextEdit(host)
+        editor.resize(260, 64)
+        host.show()
+        self.app.processEvents()
+        image = editor.viewport().grab().toImage()
+        sample = image.pixelColor(image.width() // 2, image.height() - 4)
+        self.assertEqual(sample.alpha(), 255)
+        self.assertEqual(sample.name(), colors("light")["panel"].lower())
+        host.close()
+        host.deleteLater()
 
     def test_conversation_delete_uses_the_themed_confirmation(self) -> None:
         cfg = dict(DEFAULTS)

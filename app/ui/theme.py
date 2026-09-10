@@ -465,7 +465,7 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
 }}
 QTextEdit#chatInput {{
     color: {c['fg']};
-    background: transparent;
+    background: {c['panel']};
     border: none;
     padding: 2px 2px;
     font-size: 14px;
