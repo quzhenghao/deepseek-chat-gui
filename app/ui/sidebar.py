@@ -5,6 +5,7 @@ from datetime import datetime
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from .. import ASSETS_DIR
 from .controls import RoundedMenu
-from .icons import apply_icon
+from .icons import apply_icon, tint_pixmap
 from .theme import SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, colors
 
 
@@ -33,6 +34,147 @@ def _format_time(value: str) -> str:
     if timestamp.year == now.year:
         return timestamp.strftime("%m月%d日")
     return timestamp.strftime("%Y年%m月%d日")
+
+
+class _ModeIndexCompat:
+    """Small compatibility facade for callers that used the former combo API.
+
+    The visible control is now a pair of buttons.  Keeping this read/write
+    facade avoids breaking integrations that only queried ``mode_combo`` while
+    ensuring no combo box is rendered for product switching.
+    """
+
+    _DATA = ("chat", "harness")
+
+    def __init__(self, owner: "ProductModeSelector") -> None:
+        self._owner = owner
+        self._blocked = False
+
+    def count(self) -> int:
+        return len(self._DATA)
+
+    def itemData(self, index: int):
+        if not 0 <= index < len(self._DATA):
+            return None
+        return self._DATA[index]
+
+    def findData(self, value: str) -> int:
+        try:
+            return self._DATA.index(value)
+        except ValueError:
+            return -1
+
+    def currentIndex(self) -> int:
+        return self.findData(self._owner.mode())
+
+    def currentData(self):
+        return self._owner.mode()
+
+    def setCurrentIndex(self, index: int) -> None:
+        value = self.itemData(index)
+        if value is not None and value != self._owner.mode():
+            self._owner.set_mode(value)
+            if not self._blocked:
+                self._owner.modeChanged.emit(value)
+
+    def blockSignals(self, blocked: bool) -> None:
+        self._blocked = bool(blocked)
+
+
+class ProductModeSelector(QWidget):
+    """The app-wide ``Work Type`` switcher rendered as two rounded buttons."""
+
+    modeChanged = Signal(str)
+
+    def __init__(
+        self,
+        theme: str = "light",
+        *,
+        show_collapse: bool = False,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("productModeSelector")
+        self._theme = theme
+        self.mode_combo = _ModeIndexCompat(self)
+        self._build_ui(show_collapse)
+        self.apply_theme(theme)
+
+    def _build_ui(self, show_collapse: bool) -> None:
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+
+        self.work_type_label = QLabel("Work Type:")
+        self.work_type_label.setObjectName("workTypeLabel")
+        root.addWidget(self.work_type_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._button_group = QButtonGroup(self)
+        self._button_group.setExclusive(True)
+        self.chat_button = self._mode_button("Chat", "chat")
+        self.harness_button = self._mode_button("Harness", "harness")
+        self._button_group.addButton(self.chat_button)
+        self._button_group.addButton(self.harness_button)
+        self.chat_button.clicked.connect(lambda: self._emit_mode("chat"))
+        self.harness_button.clicked.connect(lambda: self._emit_mode("harness"))
+        self.chat_button.setChecked(True)
+        root.addWidget(self.chat_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(self.harness_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        if show_collapse:
+            self.collapse_button = QToolButton()
+            self.collapse_button.setFixedSize(30, 30)
+            self.collapse_button.setToolTip("收起侧边栏")
+            root.addWidget(self.collapse_button, 0, Qt.AlignmentFlag.AlignTop)
+        else:
+            self.collapse_button = None
+
+    @staticmethod
+    def _mode_button(text: str, mode: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(f"workType{mode.title()}Button")
+        button.setCheckable(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setAccessibleName(f"Work Type {text}")
+        button.setMinimumWidth(80 if mode == "chat" else 96)
+        button.setFixedHeight(36)
+        return button
+
+    def _emit_mode(self, mode: str) -> None:
+        self.set_mode(mode)
+        self.modeChanged.emit(mode)
+
+    def mode(self) -> str:
+        return "harness" if self.harness_button.isChecked() else "chat"
+
+    def set_mode(self, mode: str) -> None:
+        normalized = mode if mode in {"chat", "harness"} else "chat"
+        button = self.harness_button if normalized == "harness" else self.chat_button
+        if not button.isChecked():
+            self._button_group.blockSignals(True)
+            button.setChecked(True)
+            self._button_group.blockSignals(False)
+
+    def apply_theme(self, theme: str) -> None:
+        self._theme = theme
+        palette = colors(theme)
+        self.setStyleSheet(
+            f"QWidget#productModeSelector{{background:transparent;}}"
+            f"QLabel#workTypeLabel{{color:{palette['fg_sub']};background:transparent;"
+            "font-size:14px;font-weight:650;}"
+            f"QPushButton#workTypeChatButton, QPushButton#workTypeHarnessButton{{"
+            f"color:{palette['fg_sub']};background:transparent;border:1px solid transparent;"
+            "border-radius:10px;padding:6px 15px;font-size:15px;font-weight:700;}"
+            f"QPushButton#workTypeChatButton:hover, QPushButton#workTypeHarnessButton:hover{{"
+            f"color:{palette['fg']};background:{palette['hover']};}}"
+            f"QPushButton#workTypeChatButton:checked, QPushButton#workTypeHarnessButton:checked{{"
+            f"color:{palette['mode_active_fg']};background:{palette['mode_active']};"
+            f"border-color:{palette['border_strong']};}}"
+            f"QPushButton#workTypeChatButton:pressed, QPushButton#workTypeHarnessButton:pressed{{"
+            f"background:{palette['selected']};}}"
+        )
+        if self.collapse_button is not None:
+            apply_icon(self.collapse_button, "sidebar", palette["fg_sub"], 19)
 
 
 class ConversationItem(QWidget):
@@ -134,6 +276,7 @@ class Sidebar(QWidget):
     deleteConversations = Signal(list)
     settingsRequested = Signal()
     collapseRequested = Signal()
+    modeChanged = Signal(str)
 
     def __init__(self, theme: str = "light", parent=None) -> None:
         super().__init__(parent)
@@ -154,29 +297,47 @@ class Sidebar(QWidget):
         root.setContentsMargins(16, 17, 16, 16)
         root.setSpacing(8)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(4, 0, 4, 0)
-        header.setSpacing(9)
-        mark = QLabel()
-        mark.setPixmap(
-            QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(30, 30)
-        )
-        mark.setFixedSize(30, 30)
-        header.addWidget(mark)
-        brand = QLabel("deepseek")
-        brand.setObjectName("settingsBrand")
-        header.addWidget(brand)
-        header.addStretch()
-        self.collapse_button = QToolButton()
+        self.brand_header = QWidget(self)
+        self.brand_header.setObjectName("chatBrandHeader")
+        brand_row = QHBoxLayout(self.brand_header)
+        brand_row.setContentsMargins(4, 0, 4, 0)
+        brand_row.setSpacing(9)
+        self.brand_mark = QLabel(self.brand_header)
+        self.brand_mark.setObjectName("chatBrandMark")
+        self.brand_mark.setFixedSize(34, 34)
+        brand_row.addWidget(self.brand_mark, 0, Qt.AlignmentFlag.AlignTop)
+        self.brand_wordmark = QLabel("deepseek", self.brand_header)
+        self.brand_wordmark.setObjectName("chatBrandWordmark")
+        brand_row.addWidget(self.brand_wordmark, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.brand_badge = QLabel("CHAT", self.brand_header)
+        self.brand_badge.setObjectName("brandBadge")
+        brand_row.addWidget(self.brand_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Keep the previous label as a stable compatibility endpoint for
+        # integrations and tests.  The visible brand is the wordmark + badge
+        # above, matching the Harness web header.
+        self.brand_label = QLabel("DeepSeek", self.brand_header)
+        self.brand_label.setObjectName("chatBrand")
+        self.brand_label.setAccessibleName("DeepSeek")
+        self.brand_label.hide()
+        self.brand = self.brand_label
+        brand_row.addStretch(1)
+        self.collapse_button = QToolButton(self.brand_header)
         self.collapse_button.setFixedSize(30, 30)
         self.collapse_button.setToolTip("收起侧边栏")
         self.collapse_button.clicked.connect(self.collapseRequested.emit)
-        header.addWidget(self.collapse_button)
-        root.addLayout(header)
+        brand_row.addWidget(self.collapse_button, 0, Qt.AlignmentFlag.AlignTop)
+        root.addWidget(self.brand_header)
         root.addSpacing(18)
 
+        # Keep a hidden compatibility endpoint for code that used the former
+        # sidebar-local selector.  The visible switcher lives only in the
+        # application-level Work Type bar.
+        self.mode_selector = ProductModeSelector(self._theme, parent=self)
+        self.mode_selector.hide()
+        self.mode_selector.modeChanged.connect(self.modeChanged.emit)
+
         self.new_button = QPushButton("新建对话")
-        self.new_button.setObjectName("settingsNavBtn")
+        self.new_button.setObjectName("newChatButton")
         self.new_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_button.clicked.connect(self.newChatRequested.emit)
         self.new_button.setIconSize(QSize(18, 18))
@@ -344,9 +505,29 @@ class Sidebar(QWidget):
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         palette = colors(theme)
-        apply_icon(self.collapse_button, "sidebar", palette["fg_sub"], 19)
-        apply_icon(self.new_button, "plus", palette["accent"], 18)
+        self.mode_selector.apply_theme(theme)
+        self.brand_mark.setPixmap(
+            tint_pixmap(
+                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(34, 34),
+                palette["fg"],
+            )
+        )
+        self.brand_wordmark.setStyleSheet(
+            f"color:{palette['fg']};background:transparent;"
+            "font-size:22px;font-weight:650;"
+        )
+        self.brand_badge.setStyleSheet(
+            "color:#FFFFFF;background:#171717;border-radius:4px;"
+            "padding:3px 6px 2px 6px;font-size:10px;font-weight:750;"
+        )
+        self.brand_label.setStyleSheet(
+            f"color:{palette['fg']};background:transparent;font-size:18px;font-weight:650;"
+        )
+        apply_icon(self.new_button, "plus", palette["fg_sub"], 18)
         apply_icon(self.batch_button, "select", palette["fg_sub"], 17)
         apply_icon(self.settings_button, "settings", palette["fg_sub"], 18)
         for item in self._items.values():
             item.apply_theme(theme)
+
+    def set_mode(self, mode: str) -> None:
+        self.mode_selector.set_mode(mode)

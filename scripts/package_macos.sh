@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${DEEPSEEK_PYTHON:-/opt/anaconda3/envs/deepseek-chat/bin/python}"
-APP_NAME="DeepSeek Chat"
+APP_NAME="DeepSeek"
 
 cd "$ROOT_DIR"
 
@@ -20,11 +20,23 @@ SPEC_FILE="$ROOT_DIR/DeepSeekChat.spec"
 DIST_APP="$ROOT_DIR/dist/${APP_NAME}.app"
 RELEASE_DIR="$ROOT_DIR/release"
 STAGE_DIR="$ROOT_DIR/build/dmg-stage"
-DMG_NAME="DeepSeek-Chat-${VERSION}-macos-${ARCH}.dmg"
+DMG_NAME="DeepSeek-${VERSION}-macos-${ARCH}.dmg"
 DMG_PATH="$RELEASE_DIR/$DMG_NAME"
 
 echo ">> Building ${APP_NAME}.app with PyInstaller"
+if [ "${DEEPSEEK_SKIP_HARNESS_BUNDLE:-0}" != "1" ]; then
+  "$ROOT_DIR/scripts/vendor_harness.sh"
+else
+  echo ">> Skipping bundled Harness runtime (DEEPSEEK_SKIP_HARNESS_BUNDLE=1)"
+fi
 "$PYTHON_BIN" -m PyInstaller --clean --noconfirm "$SPEC_FILE"
+
+# PyInstaller treats the embedded Node executable as an application resource;
+# restore its execute bit after collection so QProcess can launch it directly.
+HARNESS_NODE="$DIST_APP/Contents/Resources/vendor/harness/node/bin/node"
+if [ -f "$HARNESS_NODE" ]; then
+  chmod +x "$HARNESS_NODE"
+fi
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$RELEASE_DIR"

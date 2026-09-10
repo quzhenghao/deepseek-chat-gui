@@ -12,11 +12,16 @@ hiddenimports = [
     "PySide6.QtWebEngineWidgets",
 ]
 
+datas = [("assets", "assets")]
+bundled_harness = Path(SPECPATH) / "vendor" / "harness"
+if bundled_harness.is_dir():
+    datas.append((str(bundled_harness), "vendor/harness"))
+
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[("assets", "assets")],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -31,7 +36,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="DeepSeek Chat",
+    name="DeepSeek",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -51,17 +56,17 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="DeepSeek Chat",
+    name="DeepSeek",
 )
 
 app = BUNDLE(
     coll,
-    name="DeepSeek Chat.app",
+    name="DeepSeek.app",
     icon="assets/app-icon.icns",
-    bundle_identifier="com.local.deepseek-chat",
+    bundle_identifier="com.local.deepseek",
     info_plist={
-        "CFBundleName": "DeepSeek Chat",
-        "CFBundleDisplayName": "DeepSeek Chat",
+        "CFBundleName": "DeepSeek",
+        "CFBundleDisplayName": "DeepSeek",
         "CFBundleShortVersionString": __version__,
         "CFBundleVersion": __version__,
         "CFBundleIconFile": "app-icon.icns",

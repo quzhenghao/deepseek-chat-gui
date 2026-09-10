@@ -19,7 +19,7 @@ def rounded_thumbnail(path: str, size: int = THUMB_SIZE) -> QPixmap:
     image = QImage(path)
     if image.isNull():
         image = QImage(size, size, QImage.Format.Format_ARGB32)
-        image.fill(QColor("#E4E7EC"))
+        image.fill(QColor("#E5E5E5"))
     scaled = QPixmap.fromImage(image).scaled(
         size,
         size,

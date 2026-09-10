@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     QElapsedTimer,
+    QEvent,
     QObject,
     QPointF,
     Qt,
@@ -46,7 +47,7 @@ from PySide6.QtWidgets import (
 from .. import ASSETS_DIR
 from ..markdown import to_html
 from .controls import RoundedMenu
-from .icons import apply_icon
+from .icons import apply_icon, tint_pixmap
 from .theme import colors
 
 
@@ -156,6 +157,23 @@ _MATH_WEB_SHELL = r"""<!doctype html>
       };
       window.refreshDeepSeekLayout = reportLayout;
 
+      document.addEventListener("click", (event) => {
+        const button = event.target instanceof Element
+          ? event.target.closest(".code-copy")
+          : null;
+        if (!button) return;
+        const block = button.closest(".code-block");
+        const code = block ? block.querySelector("pre code") : null;
+        if (!code || !bridge) return;
+        bridge.copyText(code.textContent || "");
+        button.textContent = "已复制";
+        button.classList.add("is-copied");
+        window.setTimeout(() => {
+          button.textContent = "复制";
+          button.classList.remove("is-copied");
+        }, 1400);
+      });
+
       if (typeof QWebChannel !== "undefined" && typeof qt !== "undefined") {
         new QWebChannel(qt.webChannelTransport, (channel) => {
           bridge = channel.objects.mathBridge;
@@ -200,6 +218,7 @@ class _MathPage(QWebEnginePage):
 class _MathBridge(QObject):
     heightReported = Signal(int)
     verticalScrollRequested = Signal(float)
+    copyRequested = Signal(str)
 
     @Slot(float)
     def reportHeight(self, height: float) -> None:
@@ -208,6 +227,10 @@ class _MathBridge(QObject):
     @Slot(float)
     def scrollVertically(self, delta: float) -> None:
         self.verticalScrollRequested.emit(delta)
+
+    @Slot(str)
+    def copyText(self, text: str) -> None:
+        self.copyRequested.emit(text)
 
 
 class _MathWebView(QWebEngineView):
@@ -251,6 +274,9 @@ class _MathWebView(QWebEngineView):
         self._bridge = _MathBridge(self)
         self._bridge.heightReported.connect(self._apply_content_height)
         self._bridge.verticalScrollRequested.connect(self._forward_vertical_scroll)
+        self._bridge.copyRequested.connect(
+            lambda text: QApplication.clipboard().setText(text)
+        )
         self._channel = QWebChannel(page)
         self._channel.registerObject("mathBridge", self._bridge)
         page.setWebChannel(self._channel)
@@ -351,7 +377,10 @@ class RichText(QWidget):
 
     def set_html(self, body: str) -> None:
         self._html = body
-        self._uses_math = "data-tex=" in body
+        # Math and code blocks both benefit from the local WebEngine renderer:
+        # KaTeX needs DOM layout, while code blocks use a real copy button and
+        # the same WebChannel clipboard bridge.
+        self._uses_math = "data-tex=" in body or "data-code-block=" in body
         self._text_view.setHtml(body)
         if self._uses_math:
             self._ensure_web_view().set_content(body)
@@ -684,7 +713,10 @@ class AssistantBubble(MessageBubble):
         self.avatar = QLabel()
         self.avatar.setFixedSize(28, 28)
         self.avatar.setPixmap(
-            QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(28, 28)
+            tint_pixmap(
+                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(28, 28),
+                colors(theme)["fg"],
+            )
         )
         self.avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         outer.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
@@ -825,6 +857,12 @@ class AssistantBubble(MessageBubble):
     def apply_theme(self, theme: str) -> None:
         super().apply_theme(theme)
         palette = colors(theme)
+        self.avatar.setPixmap(
+            tint_pixmap(
+                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(28, 28),
+                palette["fg"],
+            )
+        )
         self.status_indicator.set_theme(theme)
         self.content_view.setStyleSheet(
             f"background:transparent;color:{palette['fg']};border:none;"
@@ -867,13 +905,20 @@ class ErrorBubble(MessageBubble):
 
 
 class ChatView(QScrollArea):
+    followChanged = Signal(bool)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._theme = "light"
         self._bubbles: list[MessageBubble] = []
+        self._follow_output = True
+        self._programmatic_scroll = False
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
+        self.viewport().installEventFilter(self)
+        self.verticalScrollBar().installEventFilter(self)
 
         self.container = QWidget()
         self.container.setObjectName("messageContainer")
@@ -888,6 +933,7 @@ class ChatView(QScrollArea):
         for bubble in self._bubbles:
             bubble.deleteLater()
         self._bubbles.clear()
+        self._set_follow_output(True)
 
     def _add(self, bubble: MessageBubble) -> MessageBubble:
         self._bubbles.append(bubble)
@@ -959,10 +1005,18 @@ class ChatView(QScrollArea):
         width = min(LANE_MAX_WIDTH, max(420, self.viewport().width() - 56))
         bubble.setFixedWidth(width)
 
+    def set_bottom_inset(self, inset: int) -> None:
+        """Leave room for the overlaid composer without changing message widths."""
+
+        left, top, right, _bottom = self.messages.getContentsMargins()
+        self.messages.setContentsMargins(left, top, right, max(18, int(inset)))
+        self.scroll_to_bottom()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         for bubble in self._bubbles:
             self._apply_size(bubble)
+        self.scroll_to_bottom()
 
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
@@ -974,8 +1028,74 @@ class ChatView(QScrollArea):
         for bubble in self._bubbles:
             bubble.apply_theme(theme)
 
-    def scroll_to_bottom(self, force: bool = False) -> None:
+    @property
+    def follows_output(self) -> bool:
+        return self._follow_output
+
+    def _set_follow_output(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._follow_output:
+            return
+        self._follow_output = enabled
+        self.followChanged.emit(enabled)
+
+    def pause_follow(self) -> None:
+        """Pause streaming auto-scroll after a user navigates upward."""
+
+        if self.verticalScrollBar().maximum() > 0:
+            self._set_follow_output(False)
+
+    def resume_follow(self) -> None:
+        """Resume auto-scroll and reveal the newest generated content."""
+
+        self._set_follow_output(True)
+        self.scroll_to_bottom(force=True)
+
+    def _on_scroll_value_changed(self, value: int) -> None:
+        if self._programmatic_scroll:
+            return
         bar = self.verticalScrollBar()
-        should_follow = force or bar.maximum() - bar.value() < 120
-        if should_follow:
-            QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+        maximum = bar.maximum()
+        if maximum <= 0:
+            return
+        # Once the user takes over the scroll position, only the explicit
+        # "回到最新消息" control (or a new outgoing message) resumes follow.
+        # This prevents an intermediate layout pass at the bottom from
+        # accidentally re-enabling follow while a response is still streaming.
+        if maximum - value > 10:
+            self._set_follow_output(False)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.viewport() and event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta < 0:
+                self.pause_follow()
+            elif delta > 0:
+                self._on_scroll_value_changed(self.verticalScrollBar().value())
+        elif watched is self.verticalScrollBar():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                self.pause_follow()
+            elif event.type() == QEvent.Type.MouseMove and event.buttons():
+                self.pause_follow()
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta < 0:
+            self.pause_follow()
+        super().wheelEvent(event)
+
+    def scroll_to_bottom(self, force: bool = False) -> None:
+        if force:
+            self._set_follow_output(True)
+        if not self._follow_output:
+            return
+        QTimer.singleShot(0, self._scroll_to_bottom_if_following)
+
+    def _scroll_to_bottom_if_following(self) -> None:
+        if not self._follow_output:
+            return
+        bar = self.verticalScrollBar()
+        self._programmatic_scroll = True
+        bar.setValue(bar.maximum())
+        self._programmatic_scroll = False

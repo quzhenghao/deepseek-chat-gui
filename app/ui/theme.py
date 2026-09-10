@@ -3,50 +3,59 @@ from __future__ import annotations
 from .. import ASSETS_DIR
 
 
-ACCENT = "#4D6BFE"
+# The native surfaces intentionally share Harness' neutral visual language.
+# Keep the active product switcher deliberately monochrome so Chat and Harness
+# read as one product family instead of two unrelated accent systems.
+ACCENT = "#171717"
 
 _LIGHT = {
     "bg": "#FFFFFF",
-    "side_bg": "#F6F8FC",
+    "side_bg": "#F3F3F3",
     "panel": "#FFFFFF",
     "canvas": "#FFFFFF",
-    "border": "#E5EAF2",
-    "border_strong": "#D6DDE9",
-    "fg": "#182230",
-    "fg_sub": "#667085",
-    "fg_muted": "#98A2B3",
-    "hover": "#EDF1F7",
-    "selected": "#E9EDFF",
+    "border": "#E6E7E9",
+    "border_strong": "#D4D6D9",
+    "fg": "#1B1B1C",
+    "fg_sub": "#5D626A",
+    "fg_muted": "#92979F",
+    "hover": "#ECEDEF",
+    "selected": "#E3E5E8",
     "accent": ACCENT,
-    "accent_hover": "#405CF2",
-    "accent_soft": "#EEF1FF",
-    "user_bubble": "#F0F2F6",
-    "reason_bg": "#F7F8FB",
-    "code_bg": "#F5F7FA",
+    "accent_hover": "#000000",
+    "accent_soft": "#EEEEEE",
+    "mode_active": "#1B1B1C",
+    "mode_active_fg": "#FFFFFF",
+    "primary_fg": "#FFFFFF",
+    "user_bubble": "#F0F1F2",
+    "reason_bg": "#F7F7F8",
+    "code_bg": "#F4F5F6",
     "danger": "#D92D20",
     "danger_soft": "#FFF1F0",
     "success": "#12B76A",
-    "shadow": "#1A23331A",
+    "shadow": "#1717171A",
 }
 
 _DARK = {
-    "bg": "#1A1D24",
-    "side_bg": "#14171D",
-    "panel": "#20242D",
-    "canvas": "#1A1D24",
-    "border": "#303641",
-    "border_strong": "#414958",
-    "fg": "#F2F4F7",
-    "fg_sub": "#B7C0CE",
-    "fg_muted": "#7F8998",
-    "hover": "#272C36",
-    "selected": "#2B3355",
-    "accent": "#6E85FF",
-    "accent_hover": "#7D92FF",
-    "accent_soft": "#293052",
-    "user_bubble": "#2A2F39",
-    "reason_bg": "#222731",
-    "code_bg": "#151923",
+    "bg": "#1A1A1A",
+    "side_bg": "#141414",
+    "panel": "#222222",
+    "canvas": "#1A1A1A",
+    "border": "#333333",
+    "border_strong": "#454545",
+    "fg": "#F2F2F2",
+    "fg_sub": "#B7B7B7",
+    "fg_muted": "#858585",
+    "hover": "#2A2A2A",
+    "selected": "#363636",
+    "accent": "#E8E8E8",
+    "accent_hover": "#FFFFFF",
+    "accent_soft": "#353535",
+    "mode_active": "#F2F2F2",
+    "mode_active_fg": "#141414",
+    "primary_fg": "#111111",
+    "user_bubble": "#2B2B2B",
+    "reason_bg": "#242424",
+    "code_bg": "#151515",
     "danger": "#F97066",
     "danger_soft": "#3A2426",
     "success": "#32D583",
@@ -74,6 +83,7 @@ def build_qss(theme: str = "light") -> str:
 QWidget {{
     color: {c['fg']};
     font-size: 14px;
+    font-family: "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif;
 }}
 QMainWindow, QDialog, QWidget#central, QWidget#chatPage, QWidget#welcomePage,
 QWidget#settingsPage, QWidget#settingsRight, QWidget#settingsContent {{
@@ -98,10 +108,18 @@ QWidget#chatHeader, QWidget#settingsHeader {{
 QWidget#composerArea {{
     background: {c['canvas']};
 }}
-QFrame#composerCard, QFrame#sectionCard {{
+QWidget#chatWorkspace {{
+    background: {c['canvas']};
+}}
+QFrame#composerCard {{
     background: {c['panel']};
-    border: 1px solid {c['border_strong']};
-    border-radius: 16px;
+    border: 1px dashed {c['border_strong']};
+    border-radius: 18px;
+}}
+QFrame#sectionCard {{
+    background: {c['panel']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
 }}
 QFrame#reasoningPanel {{
     background: {c['reason_bg']};
@@ -118,6 +136,21 @@ QLabel#settingsBrand {{
     font-size: 19px;
     font-weight: 650;
 }}
+QLabel#chatBrandWordmark, QLabel#settingsBrandWordmark {{
+    color: {c['fg']};
+    background: transparent;
+    font-size: 22px;
+    font-weight: 650;
+}}
+QLabel#brandBadge {{
+    color: #FFFFFF;
+    background: #171717;
+    border-radius: 4px;
+    padding: 3px 6px 2px 6px;
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 0.7px;
+}}
 QLabel#settingsPageTitle {{
     color: {c['fg']};
     font-size: 18px;
@@ -127,6 +160,12 @@ QLabel#welcomeTitle {{
     color: {c['fg']};
     font-size: 26px;
     font-weight: 650;
+}}
+QLabel#welcomeKicker {{
+    color: {c['fg_muted']};
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
 }}
 QLabel#sectionTitle {{
     color: {c['fg']};
@@ -144,6 +183,20 @@ QLabel#sectionLabel {{
     color: {c['fg_muted']};
     font-size: 11px;
     font-weight: 600;
+}}
+QLabel#onboardingHint {{
+    color: {c['fg_sub']};
+    background: {c['accent_soft']};
+    border-radius: 8px;
+    padding: 7px 9px;
+    font-size: 11px;
+}}
+QLabel#environmentStatus {{
+    color: {c['fg_sub']};
+    background: {c['accent_soft']};
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11px;
 }}
 QLabel#visionChip, QLabel#statusChip {{
     color: {c['accent']};
@@ -173,6 +226,20 @@ QPushButton#suggestionBtn:hover {{
     border-color: {c['border_strong']};
     background: {c['hover']};
 }}
+QPushButton#newChatButton {{
+    color: {c['fg']};
+    background: {c['panel']};
+    border: 1px solid {c['border']};
+    border-radius: 12px;
+    min-height: 44px;
+    padding: 8px 14px;
+    font-size: 15px;
+    font-weight: 600;
+}}
+QPushButton#newChatButton:hover {{
+    background: {c['hover']};
+    border-color: {c['border_strong']};
+}}
 QPushButton#thinkingBtn {{
     color: {c['fg_sub']};
     padding: 5px 9px;
@@ -181,8 +248,14 @@ QPushButton#thinkingBtn:checked {{
     color: {c['accent']};
     background: {c['accent_soft']};
 }}
+QToolButton#attachBtn {{
+    background: {c['accent_soft']};
+    border-radius: 17px;
+    padding: 0;
+}}
+QToolButton#attachBtn:hover {{ background: {c['selected']}; }}
 QPushButton#primaryBtn {{
-    color: #FFFFFF;
+    color: {c['primary_fg']};
     background: {c['accent']};
     border-radius: 9px;
     font-weight: 600;
@@ -209,7 +282,7 @@ QPushButton#settingsNavBtn:checked {{
     background: {c['accent_soft']};
     border-color: {c['selected']};
 }}
-QPushButton#settingsBackBtn, QPushButton#sidebarFooterBtn {{
+QPushButton#settingsBackBtn {{
     color: {c['fg_sub']};
     background: {c['panel']};
     border: 1px solid {c['border']};
@@ -217,10 +290,24 @@ QPushButton#settingsBackBtn, QPushButton#sidebarFooterBtn {{
     text-align: left;
     padding: 9px 12px;
 }}
-QPushButton#settingsBackBtn:hover, QPushButton#sidebarFooterBtn:hover {{
+QPushButton#settingsBackBtn:hover {{
     color: {c['fg']};
     background: {c['hover']};
     border-color: {c['border_strong']};
+}}
+QPushButton#sidebarFooterBtn {{
+    color: {c['fg_sub']};
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    text-align: left;
+    min-height: 40px;
+    padding: 8px 10px;
+    font-size: 14px;
+}}
+QPushButton#sidebarFooterBtn:hover {{
+    color: {c['fg']};
+    background: {c['hover']};
 }}
 QToolButton {{
     color: {c['fg_sub']};
@@ -251,6 +338,21 @@ QToolButton#stopBtn {{
     min-height: 36px;
     max-height: 36px;
     padding: 0;
+}}
+QToolButton#followLatestBtn {{
+    color: {c['fg']};
+    background: {c['panel']};
+    border: 1px solid {c['border_strong']};
+    border-radius: 20px;
+    min-width: 40px;
+    max-width: 40px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0;
+}}
+QToolButton#followLatestBtn:hover {{
+    background: {c['hover']};
+    border-color: {c['fg_muted']};
 }}
 QToolButton#reasonToggle {{
     color: {c['fg_sub']};

@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import config
+from app.harness import ensure_harness_defaults
 from app.storage import ConversationStore
 
 
@@ -20,20 +21,20 @@ class ConfigTests(unittest.TestCase):
         cleaned = config._sanitize(
             {
                 **config.DEFAULTS,
-                "models": ["DeepSeek-V4-Flash", "DeepSeek-V4-Pro"],
-                "default_model": "DeepSeek-V4-Pro",
+                "models": ["DeepSeek-V4-Flash", "DeepSeek V4 Pro"],
+                "default_model": "DeepSeek V4 Pro",
                 "last_effort": "Medium",
             }
         )
-        self.assertEqual(cleaned["models"], ["deepseek-v4-flash", "deepseek-v4-pro"])
-        self.assertEqual(cleaned["default_model"], "deepseek-v4-pro")
+        self.assertEqual(cleaned["models"], ["deepseek-flash"])
+        self.assertEqual(cleaned["default_model"], "deepseek-flash")
         self.assertEqual(cleaned["last_effort"], "high")
 
     def test_official_legacy_base_url_is_normalized(self) -> None:
         cleaned = config._sanitize({**config.DEFAULTS, "base_url": "https://api.deepseek.com/v1"})
         self.assertEqual(cleaned["base_url"], "https://api.deepseek.com")
 
-    def test_existing_official_config_receives_limited_v41_model_once(self) -> None:
+    def test_existing_official_config_migrates_to_current_flash_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.json"
@@ -49,17 +50,13 @@ class ConfigTests(unittest.TestCase):
                 loaded = config.load_config()
         self.assertEqual(
             loaded["models"],
-            [
-                "deepseek-v4-flash",
-                config.V41_FLASH_LIMITED_MODEL,
-                "deepseek-v4-pro",
-            ],
+            ["deepseek-flash"],
         )
         self.assertEqual(
             loaded["model_catalog_version"], config.MODEL_CATALOG_VERSION
         )
 
-    def test_current_catalog_respects_a_removed_limited_model(self) -> None:
+    def test_current_catalog_replaces_a_retired_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.json"
@@ -76,16 +73,31 @@ class ConfigTests(unittest.TestCase):
                 patch("app.config.CONFIG_PATH", config_path),
             ):
                 loaded = config.load_config()
-        self.assertEqual(loaded["models"], ["deepseek-v4-pro"])
+        self.assertEqual(loaded["models"], ["deepseek-flash"])
 
-    def test_unlisted_model_is_only_added_to_official_api_catalogs(self) -> None:
-        merged = config.include_unlisted_builtin_models(["deepseek-v4-flash"])
-        self.assertEqual(
-            merged,
-            ["deepseek-v4-flash", config.V41_FLASH_LIMITED_MODEL],
+    def test_official_model_catalog_resolves_to_current_flash(self) -> None:
+        merged = config.normalize_official_models(
+            ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-flash"]
         )
+        self.assertEqual(merged, ["deepseek-flash"])
         self.assertTrue(config.uses_official_api("https://api.deepseek.com/v1"))
         self.assertFalse(config.uses_official_api("https://example.com/v1"))
+
+    def test_harness_defaults_are_created_once_and_use_current_flash_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "harness"
+            cfg = {**config.DEFAULTS, "base_url": "https://api.deepseek.com"}
+            settings = ensure_harness_defaults(home, cfg)
+            first = settings.read_text(encoding="utf-8")
+            settings.write_text(first + "# user change\n", encoding="utf-8")
+            same_settings = ensure_harness_defaults(home, cfg)
+            self.assertEqual(same_settings, settings)
+            self.assertIn("id: deepseek-flash", first)
+            self.assertIn("apiKeyEnv: DEEPSEEK_API_KEY", first)
+            self.assertIn("thinking: enabled", first)
+            self.assertIn("reasoningEffort: high", first)
+            self.assertIn("inputModalities: [text, image]", first)
+            self.assertNotIn("deepseek-v4-pro", first)
 
 
 class StorageTests(unittest.TestCase):

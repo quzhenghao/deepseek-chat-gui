@@ -8,6 +8,38 @@ from markdown_it import MarkdownIt
 
 _MARKDOWN = MarkdownIt("commonmark", {"breaks": True, "html": False}).enable("table")
 _MATH_TOKEN_PREFIX = "DEEPSEEKFORMULATOKEN"
+_CODE_BLOCK_RE = re.compile(
+    r"<pre><code(?: class=\"language-([^\"]+)\")?>(.*?)</code></pre>",
+    flags=re.DOTALL,
+)
+_LANGUAGE_LABELS = {
+    "bash": "Bash",
+    "c": "C",
+    "cpp": "C++",
+    "css": "CSS",
+    "go": "Go",
+    "html": "HTML",
+    "java": "Java",
+    "javascript": "JavaScript",
+    "js": "JavaScript",
+    "json": "JSON",
+    "markdown": "Markdown",
+    "md": "Markdown",
+    "python": "Python",
+    "py": "Python",
+    "rust": "Rust",
+    "shell": "Shell",
+    "sql": "SQL",
+    "swift": "Swift",
+    "text": "Text",
+    "toml": "TOML",
+    "tsx": "TSX",
+    "typescript": "TypeScript",
+    "ts": "TypeScript",
+    "xml": "XML",
+    "yaml": "YAML",
+    "yml": "YAML",
+}
 
 # These environments are commonly emitted by chat models without an additional
 # \[...\] or $$...$$ wrapper. KaTeX treats them as display mathematics.
@@ -266,19 +298,52 @@ def _formula_html(expression: str, display: bool) -> str:
     )
 
 
+def _code_language_label(language: str | None) -> str:
+    normalized = str(language or "").strip().lower()
+    return _LANGUAGE_LABELS.get(normalized, normalized or "Code")
+
+
+def _decorate_code_blocks(rendered: str) -> str:
+    """Add a copy affordance while retaining Markdown's escaped code source."""
+
+    def replace(match: re.Match[str]) -> str:
+        language = match.group(1) or ""
+        body = match.group(2)
+        label = html.escape(_code_language_label(language))
+        class_attribute = (
+            f' class="language-{html.escape(language, quote=True)}"'
+            if language
+            else ""
+        )
+        return (
+            '<div class="code-block" data-code-block="true">'
+            '<div class="code-toolbar">'
+            f'<span class="code-language">{label}</span>'
+            '<button class="code-copy" type="button" aria-label="复制代码">'
+            "复制"
+            "</button>"
+            "</div>"
+            f"<pre><code{class_attribute}>{body}</code></pre>"
+            "</div>"
+        )
+
+    return _CODE_BLOCK_RE.sub(replace, rendered)
+
+
 def to_html(text: str, dark: bool = False) -> str:
     """Render Markdown to a safe fragment containing KaTeX formula placeholders."""
 
-    foreground = "#F2F4F7" if dark else "#1D2939"
-    secondary = "#B7C0CE" if dark else "#667085"
-    code_background = "#151923" if dark else "#F5F7FA"
-    border = "#394150" if dark else "#E4E7EC"
-    scroll_track = "#202633" if dark else "#EEF1F5"
-    scroll_thumb = "#667085" if dark else "#98A2B3"
+    foreground = "#F2F2F2" if dark else "#171717"
+    secondary = "#B7B7B7" if dark else "#5E5E5E"
+    code_background = "#151515" if dark else "#F4F4F4"
+    border = "#3A3A3A" if dark else "#E3E3E3"
+    scroll_track = "#242424" if dark else "#EEEEEE"
+    scroll_thumb = "#858585" if dark else "#8F8F8F"
     error = "#FF8A8A" if dark else "#B42318"
 
     source, formulas = _extract_math(text or "")
     rendered = _MARKDOWN.render(source) if source else ""
+    rendered = _decorate_code_blocks(rendered)
     for token, expression, display in formulas:
         formula = _formula_html(expression, display)
         if display:
@@ -301,16 +366,31 @@ def to_html(text: str, dark: bool = False) -> str:
       .markdown-body li {{ margin:3px 0; }}
       .markdown-body blockquote {{ color:{secondary}; border-left:3px solid {border};
         margin:8px 0; padding-left:12px; }}
-      .markdown-body pre {{ background:{code_background}; border:1px solid {border};
-        border-radius:8px; padding:10px 12px; white-space:pre-wrap;
-        overflow-wrap:anywhere; }}
-      .markdown-body code {{ font-family:Menlo, Monaco, Consolas, monospace;
+      .markdown-body .code-block {{ margin:10px 0 12px 0; border:1px solid {border};
+        border-radius:10px; overflow:hidden; background:{code_background}; }}
+      .markdown-body .code-toolbar {{ display:flex; align-items:center; min-height:30px;
+        box-sizing:border-box; padding:4px 8px 4px 12px; border-bottom:1px solid {border};
         background:{code_background}; }}
+      .markdown-body .code-language {{ flex:1; color:{secondary}; font-size:11px;
+        font-family:Menlo, Monaco, Consolas, monospace; text-transform:none; }}
+      .markdown-body .code-copy {{ flex:none; color:{secondary}; background:transparent;
+        border:1px solid transparent; border-radius:6px; padding:3px 8px; font-size:11px;
+        cursor:pointer; }}
+      .markdown-body .code-copy:hover {{ color:{foreground}; background:{border}; }}
+      .markdown-body .code-copy.is-copied {{ color:{foreground}; background:{border}; }}
+      .markdown-body pre {{ margin:0; padding:12px 14px; background:{code_background};
+        white-space:pre; overflow-x:auto; overflow-y:hidden; }}
+      .markdown-body pre code {{ display:block; font-family:Menlo, Monaco, Consolas, monospace;
+        color:{foreground}; background:transparent; line-height:1.55; font-size:13px; }}
+      .markdown-body :not(pre) > code:not(.math-source) {{
+        font-family:Menlo, Monaco, Consolas, monospace;
+        color:{foreground}; background:{code_background}; border:1px solid {border};
+        border-radius:5px; padding:1px 5px; font-size:.92em; white-space:pre-wrap; }}
       .markdown-body table {{ border-collapse:collapse; margin:8px 0 12px 0;
         display:block; max-width:100%; overflow-x:auto; }}
       .markdown-body th, .markdown-body td {{
         border:1px solid {border}; padding:6px 9px; }}
-      .markdown-body a {{ color:#4D6BFE; text-decoration:none; }}
+      .markdown-body a {{ color:{foreground}; text-decoration:underline; }}
       .markdown-body hr {{ border:none; border-top:1px solid {border}; }}
       .markdown-body .math-inline {{ display:inline-block; max-width:100%;
         overflow:visible; vertical-align:-0.18em;

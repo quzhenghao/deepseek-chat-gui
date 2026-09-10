@@ -11,6 +11,8 @@ from typing import Callable, Iterator
 
 import requests
 
+from .config import normalize_official_models, uses_official_api
+
 
 SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_INLINE_IMAGE_BYTES = 32 * 1024 * 1024
@@ -220,11 +222,16 @@ def list_models(cfg: dict, timeout: tuple[int, int] = (5, 15)) -> list[str]:
         raise APIError(_response_error(response))
     try:
         data = response.json()
-        return [
+        models = [
             str(item["id"])
             for item in data.get("data", [])
             if isinstance(item, dict) and item.get("id")
         ]
+        return (
+            normalize_official_models(models)
+            if uses_official_api(cfg.get("base_url"))
+            else models
+        )
     except (ValueError, TypeError) as exc:
         raise APIError("模型列表响应格式无效") from exc
 

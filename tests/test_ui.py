@@ -14,12 +14,13 @@ from PySide6.QtGui import QHelpEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from app import ASSETS_DIR
 from app.config import (
     DEFAULTS,
     EFFORT_LABELS,
     EFFORT_LEVELS,
     MODEL_CAPABILITIES,
-    V41_FLASH_LIMITED_MODEL,
+    V41_FLASH_MODEL,
     effort_label,
     is_vision_model,
     model_label,
@@ -27,16 +28,18 @@ from app.config import (
 )
 from app.api import payload_messages
 from app.ui.controls import (
+    ConfirmationDialog,
+    HoverTipWidget,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     NoticeDialog,
     RoundedComboBox,
     RoundedMenu,
-    HoverTipWidget,
 )
 from app.ui.main_window import MainWindow
 from app.ui.message_bubbles import ChatView, ThinkingIndicator
-from app.ui.theme import SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH
+from app.ui.sidebar import ProductModeSelector
+from app.ui.theme import SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, colors
 
 
 class MemoryStore:
@@ -78,6 +81,17 @@ class MemoryStore:
         if conversation is not None:
             conversation["messages"].append(message)
 
+    def delete(self, conversation_id: str) -> None:
+        self._items = [
+            item for item in self._items if item["id"] != conversation_id
+        ]
+
+    def delete_many(self, conversation_ids: list[str]) -> None:
+        identifiers = set(conversation_ids)
+        self._items = [
+            item for item in self._items if item["id"] not in identifiers
+        ]
+
 
 class UITests(unittest.TestCase):
     @classmethod
@@ -108,7 +122,7 @@ class UITests(unittest.TestCase):
         view = ChatView()
         view.resize(900, 600)
         view.show()
-        bubble = view.add_streaming("DeepSeek V4 Flash · 深度思考 High", True)
+        bubble = view.add_streaming("DeepSeek V4.1 Flash · 深度思考 High", True)
         bubble.set_reasoning("内部思考内容")
         self.app.processEvents()
         self.assertTrue(bubble.reasoning_panel.indicator._timer.isActive())
@@ -124,7 +138,7 @@ class UITests(unittest.TestCase):
         view = ChatView()
         view.resize(900, 600)
         view.show()
-        bubble = view.add_streaming("DeepSeek V4 Flash · 标准模式", False)
+        bubble = view.add_streaming("DeepSeek V4.1 Flash · 标准模式", False)
         bubble.set_content(r"正在生成：\[\frac{a}")
         QTest.qWait(80)
         self.app.processEvents()
@@ -167,6 +181,51 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
         self.assertIsNone(bubble.content_view._web_view)
         self.assertGreater(bubble.content_view.height(), 20)
+        view.close()
+
+    def test_code_block_uses_copyable_web_renderer(self) -> None:
+        view = ChatView()
+        view.resize(720, 900)
+        view.show()
+        bubble = view.add_assistant(
+            "下面这段代码可直接复制：\n\n"
+            "~~~python\n"
+            "print('hello from DeepSeek')\n"
+            "~~~",
+            thinking=False,
+        )
+        web_view = bubble.content_view._web_view
+        self.assertIsNotNone(web_view)
+        self.assertTrue(
+            self.wait_for(
+                lambda: bubble.content_view._stack.currentWidget() is web_view,
+                timeout_ms=5000,
+            )
+        )
+        self.assertEqual(
+            self.javascript_value(
+                web_view.page(),
+                "document.querySelectorAll('.code-copy').length",
+            ),
+            1,
+        )
+        self.assertEqual(
+            self.javascript_value(
+                web_view.page(),
+                "document.querySelector('.code-language').textContent",
+            ),
+            "Python",
+        )
+        web_view.page().runJavaScript(
+            "document.querySelector('.code-copy').click()"
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: QApplication.clipboard().text()
+                == "print('hello from DeepSeek')\n",
+                timeout_ms=3000,
+            )
+        )
         view.close()
 
     def test_math_uses_katex_dom_layout_and_responsive_overflow(self) -> None:
@@ -285,7 +344,7 @@ class UITests(unittest.TestCase):
         cfg["models"] = list(DEFAULTS["models"])
         cfg["api_key"] = "test"
         window = MainWindow(cfg, MemoryStore(), self.app)
-        self.assertEqual(window.current_model(), "deepseek-v4-flash")
+        self.assertEqual(window.current_model(), "deepseek-flash")
         self.assertTrue(window.input_panel.is_thinking())
         window.close()
 
@@ -332,17 +391,68 @@ class UITests(unittest.TestCase):
         menu.addAction("删除")
         self.assertEqual(menu.minimumWidth(), 104)
         self.assertIn("border-radius: 12px", menu.styleSheet())
-        self.assertIn("background: #EEF1FF", menu.styleSheet())
+        self.assertIn("background: #EEEEEE", menu.styleSheet())
         self.assertIn("padding: 7px 10px", menu.styleSheet())
 
         menu.set_theme("dark")
-        self.assertIn("background: #293052", menu.styleSheet())
+        self.assertIn("background: #353535", menu.styleSheet())
         menu.resize(150, 100)
         menu.show()
         self.app.processEvents()
         self.assertFalse(menu.mask().isEmpty())
         menu.close()
         menu.deleteLater()
+
+    def test_confirmation_dialog_has_symmetric_rounded_actions(self) -> None:
+        dialog = ConfirmationDialog(
+            "删除对话",
+            "确定删除“测试对话”吗？\n对话消息和本地图片会一起删除。",
+            "light",
+        )
+        dialog.show()
+        self.app.processEvents()
+
+        self.assertEqual(dialog.windowType(), Qt.WindowType.Tool)
+        self.assertEqual(dialog.no_button.text(), "No")
+        self.assertEqual(dialog.yes_button.text(), "Yes")
+        self.assertEqual(dialog.no_button.size(), dialog.yes_button.size())
+        action_midpoint = (
+            dialog.no_button.geometry().center().x()
+            + dialog.yes_button.geometry().center().x()
+        ) / 2
+        self.assertAlmostEqual(
+            action_midpoint, dialog.card.rect().center().x(), delta=1
+        )
+        self.assertTrue(dialog.no_button.isDefault())
+        self.assertFalse(dialog.question_badge.pixmap().isNull())
+        self.assertIn("border-radius: 16px", dialog.card.styleSheet())
+        self.assertIn("border-radius: 10px", dialog.card.styleSheet())
+        self.assertIn("background: #FFF1F0", dialog.card.styleSheet())
+
+        dialog.apply_theme("dark")
+        self.assertIn("background: #3A2426", dialog.card.styleSheet())
+        dialog.close()
+        dialog.deleteLater()
+
+    def test_conversation_delete_uses_the_themed_confirmation(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        store = MemoryStore()
+        conversation = store.create("待删除对话")
+        window = MainWindow(cfg, store, self.app)
+
+        with patch.object(ConfirmationDialog, "ask", return_value=False) as ask:
+            window.on_delete_conversation(conversation["id"])
+        self.assertIsNotNone(store.get(conversation["id"]))
+        ask.assert_called_once()
+        self.assertEqual(ask.call_args.args[1], "删除对话")
+        self.assertEqual(ask.call_args.args[3], "light")
+
+        with patch.object(ConfirmationDialog, "ask", return_value=True):
+            window.on_delete_conversation(conversation["id"])
+        self.assertIsNone(store.get(conversation["id"]))
+        window.close()
 
     def test_effort_labels_and_thinking_timer_are_explicit(self) -> None:
         self.assertEqual(EFFORT_LABELS, {"low": "Low", "high": "High", "max": "Max"})
@@ -371,7 +481,7 @@ class UITests(unittest.TestCase):
                     r"\[A=\begin{pmatrix}1&2\\3&4\end{pmatrix}\]"
                 ),
                 "reasoning_content": None,
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "effort": "high",
                 "thinking": False,
             },
@@ -437,14 +547,14 @@ class UITests(unittest.TestCase):
 
         window.close()
 
-    def test_limited_v41_model_is_labeled_and_multimodal(self) -> None:
-        self.assertIn(V41_FLASH_LIMITED_MODEL, DEFAULTS["models"])
+    def test_current_v41_flash_model_is_labeled_and_multimodal(self) -> None:
+        self.assertIn(V41_FLASH_MODEL, DEFAULTS["models"])
         self.assertEqual(
-            model_label(V41_FLASH_LIMITED_MODEL),
-            "DeepSeek V4.1 Flash（限时至 9/10）",
+            model_label(V41_FLASH_MODEL),
+            "DeepSeek V4.1 Flash",
         )
-        self.assertTrue(is_vision_model(V41_FLASH_LIMITED_MODEL))
-        self.assertTrue(supports_thinking(V41_FLASH_LIMITED_MODEL))
+        self.assertTrue(is_vision_model(V41_FLASH_MODEL))
+        self.assertTrue(supports_thinking(V41_FLASH_MODEL))
 
     def test_main_controls_use_rounded_model_and_add_icon(self) -> None:
         cfg = dict(DEFAULTS)
@@ -461,8 +571,8 @@ class UITests(unittest.TestCase):
             EFFORT_LEVELS,
         )
         self.assertEqual(
-            window._message_meta("deepseek-v4-flash", "high", True),
-            "DeepSeek V4 Flash · 深度思考 High",
+            window._message_meta("deepseek-flash", "high", True),
+            "DeepSeek V4.1 Flash · 深度思考 High",
         )
         self.assertEqual(window.input_panel.attach_button.objectName(), "attachBtn")
         self.assertFalse(window.input_panel.attach_button.icon().isNull())
@@ -494,6 +604,92 @@ class UITests(unittest.TestCase):
         page.back_button.click()
         self.app.processEvents()
         self.assertIs(window.page_stack.currentWidget(), window.chat_page)
+        window.close()
+
+    def test_chat_harness_selector_switches_surfaces_and_keeps_runtime_warm(self) -> None:
+        selector = ProductModeSelector()
+        self.assertEqual(selector.mode(), "chat")
+        self.assertEqual(
+            [selector.mode_combo.itemData(i) for i in range(selector.mode_combo.count())],
+            ["chat", "harness"],
+        )
+        self.assertEqual(selector.work_type_label.text(), "Work Type:")
+        self.assertEqual(selector.chat_button.text(), "Chat")
+        self.assertEqual(selector.harness_button.text(), "Harness")
+        selector.harness_button.click()
+        self.assertEqual(selector.mode(), "harness")
+        selector.close()
+
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        with (
+            patch.object(window.harness_page, "start") as start,
+            patch.object(window.harness_page, "stop") as stop,
+        ):
+            window.mode_selector.harness_button.click()
+            self.app.processEvents()
+            self.assertEqual(window._mode, "harness")
+            self.assertIs(window.page_stack.currentWidget(), window.harness_page)
+            start.assert_called_once()
+
+            window.mode_selector.chat_button.click()
+            self.app.processEvents()
+            self.assertEqual(window._mode, "chat")
+            self.assertIs(window.page_stack.currentWidget(), window.chat_page)
+            # Switching products does not tear down the official runtime; the
+            # close event remains responsible for releasing it.
+            stop.assert_not_called()
+            window.close()
+            stop.assert_called_once()
+
+    def test_harness_switcher_has_one_main_window_chrome_row(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        self.assertIs(window.mode_selector.parentWidget(), window.mode_bar)
+        self.assertEqual(window.mode_bar.height(), 58)
+        self.assertNotIn("mode_bar", window.harness_page.surface.__dict__)
+        self.assertEqual(window.mode_selector.work_type_label.text(), "Work Type:")
+        self.assertIn(
+            f"background:{colors('light')['mode_active']}",
+            window.mode_selector.styleSheet(),
+        )
+        with patch.object(window.harness_page, "start"):
+            window.mode_selector.harness_button.click()
+            self.app.processEvents()
+        self.assertEqual(window.harness_page.surface.content_host.geometry().top(), 0)
+        self.assertEqual(window.harness_page.surface.status_panel.geometry().top(), 0)
+        self.assertEqual(
+            window.harness_page.surface.status_panel.parentWidget(),
+            window.harness_page.surface.content_host,
+        )
+        window.close()
+
+    def test_native_brands_use_monochrome_logo_and_neutral_sidebars(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        palette = colors("light")
+        self.assertEqual(window.sidebar.brand_label.text(), "DeepSeek")
+        self.assertEqual(window.settings_page.brand.text(), "DeepSeek")
+        self.assertEqual(window.windowTitle(), "DeepSeek")
+        self.assertFalse(window.windowIcon().isNull())
+        icon_source = (ASSETS_DIR / "app-icon.svg").read_text(encoding="utf-8")
+        self.assertIn('fill="#171717"', icon_source)
+        self.assertNotIn("#4D6BFE", icon_source)
+        self.assertEqual(palette["side_bg"], "#F3F3F3")
+        self.assertNotIn("#4D6BFE", window.mode_selector.styleSheet())
         window.close()
 
     def test_sidebar_widths_match_and_chat_defaults_to_maximum(self) -> None:
@@ -591,7 +787,7 @@ class UITests(unittest.TestCase):
         window._context = StreamContext(
             conversation["id"],
             bubble,
-            "deepseek-v4-pro",
+            "deepseek-flash",
             "high",
             False,
             content="它用于表达和组合不确定证据。",
@@ -599,7 +795,7 @@ class UITests(unittest.TestCase):
         with patch.object(window, "_start_title_summary") as summarize:
             window._on_done()
 
-        summarize.assert_called_once_with(conversation["id"], "deepseek-v4-pro")
+        summarize.assert_called_once_with(conversation["id"], "deepseek-flash")
         self.assertEqual(
             [message["role"] for message in conversation["messages"]],
             ["user", "assistant"],

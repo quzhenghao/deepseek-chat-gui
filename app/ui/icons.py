@@ -52,6 +52,9 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
     elif name == "send":
         painter.drawLine(QPointF(12, 18.5), QPointF(12, 5.5))
         painter.drawPath(_path([(6.8, 10.5), (12, 5.3), (17.2, 10.5)]))
+    elif name == "arrow-down":
+        painter.drawLine(QPointF(12, 5.5), QPointF(12, 18.5))
+        painter.drawPath(_path([(6.8, 13.5), (12, 18.7), (17.2, 13.5)]))
     elif name == "stop":
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
@@ -113,9 +116,19 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
     elif name == "refresh":
         painter.drawArc(QRectF(4.5, 4.5, 15, 15), 35 * 16, 285 * 16)
         painter.drawPath(_path([(17.5, 4.8), (19.7, 8.5), (15.5, 8.4)]))
+    elif name == "question":
+        question = QPainterPath(QPointF(7.8, 9.2))
+        question.cubicTo(8.1, 6.4, 9.8, 5, 12.2, 5)
+        question.cubicTo(14.7, 5, 16.3, 6.5, 16.3, 8.7)
+        question.cubicTo(16.3, 10.7, 15.1, 11.7, 13.7, 12.6)
+        question.cubicTo(12.5, 13.4, 12, 14.1, 12, 15.3)
+        painter.drawPath(question)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(12, 19), 1.25, 1.25)
 
 
-def icon(name: str, color: str = "#667085", size: int = 20) -> QIcon:
+def icon(name: str, color: str = "#5E5E5E", size: int = 20) -> QIcon:
     density = 3
     pixmap = QPixmap(size * density, size * density)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -133,3 +146,16 @@ def icon(name: str, color: str = "#667085", size: int = 20) -> QIcon:
 def apply_icon(button, name: str, color: str, size: int = 20) -> None:
     button.setIcon(icon(name, color, size))
     button.setIconSize(QSize(size, size))
+
+
+def tint_pixmap(pixmap: QPixmap, color: str) -> QPixmap:
+    """Apply a solid brand color while preserving the source alpha channel."""
+
+    tinted = QPixmap(pixmap)
+    if tinted.isNull():
+        return tinted
+    painter = QPainter(tinted)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), QColor(color))
+    painter.end()
+    return tinted

@@ -100,7 +100,7 @@ class APITests(unittest.TestCase):
 
         worker = TitleWorker(
             {"api_key": "test"},
-            "deepseek-v4-pro",
+            "deepseek-flash",
             [{"role": "user", "content": "完整上下文"}],
         )
         titles: list[str] = []
@@ -109,7 +109,7 @@ class APITests(unittest.TestCase):
             worker.run()
 
         self.assertEqual(titles, ["证据理论正交和"])
-        self.assertEqual(request["model"], "deepseek-v4-pro")
+        self.assertEqual(request["model"], "deepseek-flash")
         self.assertEqual(request["effort"], "low")
         self.assertFalse(request["deep_thinking"])
         self.assertEqual(request["temperature"], 0.2)
@@ -129,9 +129,24 @@ class APITests(unittest.TestCase):
                 self.assertEqual(body["model"], model)
                 self.assertEqual(body["reasoning_effort"], effort)
 
+    def test_official_model_listing_uses_current_catalog(self) -> None:
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "data": [
+                {"id": "deepseek-v4-pro"},
+                {"id": "deepseek-v4-flash"},
+                {"id": "deepseek-flash"},
+            ]
+        }
+        with patch("app.api.requests.get", return_value=response):
+            models = api.list_models(
+                {"api_key": "test", "base_url": "https://api.deepseek.com"}
+            )
+        self.assertEqual(models, ["deepseek-flash"])
+
     def test_thinking_body_uses_effort_without_temperature(self) -> None:
         body = api.build_chat_body(
-            "deepseek-v4-flash", "max", True, [{"role": "user", "content": "hi"}], 0.4, 0
+            "deepseek-flash", "max", True, [{"role": "user", "content": "hi"}], 0.4, 0
         )
         self.assertEqual(body["reasoning_effort"], "max")
         self.assertEqual(body["thinking"], {"type": "enabled"})
@@ -139,7 +154,7 @@ class APITests(unittest.TestCase):
 
     def test_standard_body_uses_temperature_without_effort(self) -> None:
         body = api.build_chat_body(
-            "deepseek-v4-flash", "high", False, [], 0.7, 2048
+            "deepseek-flash", "high", False, [], 0.7, 2048
         )
         self.assertEqual(body["temperature"], 0.7)
         self.assertEqual(body["max_tokens"], 2048)
@@ -167,7 +182,7 @@ class APITests(unittest.TestCase):
             result = list(
                 api.stream_chat(
                     {"api_key": "test", "base_url": "https://example.com"},
-                    "deepseek-v4-flash",
+                    "deepseek-flash",
                     "low",
                     True,
                     [{"role": "user", "content": "test"}],
@@ -191,7 +206,7 @@ class APITests(unittest.TestCase):
             result = list(
                 api.stream_chat(
                     {"api_key": "test", "base_url": "https://example.com"},
-                    "deepseek-v4-flash",
+                    "deepseek-flash",
                     "high",
                     True,
                     [],

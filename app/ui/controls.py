@@ -7,19 +7,22 @@ from PySide6.QtGui import QHelpEvent, QPainterPath, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QGraphicsDropShadowEffect,
     QDoubleSpinBox,
     QDialog,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QListView,
     QMenu,
+    QPushButton,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from .icons import apply_icon
+from .icons import apply_icon, icon
 from .theme import colors
 
 
@@ -190,6 +193,211 @@ class NoWheelSpinBox(QSpinBox):
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
     def wheelEvent(self, event) -> None:
         event.ignore()
+
+
+class ConfirmationDialog(QDialog):
+    """Small themed confirmation surface used for destructive actions."""
+
+    def __init__(
+        self,
+        title: str,
+        text: str,
+        theme: str = "light",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        self.setObjectName("confirmationDialog")
+        self.setWindowTitle(title)
+        self.setWindowFlags(
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+        )
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(
+            "QDialog#confirmationDialog { background: transparent; }"
+        )
+        self.setFixedWidth(460)
+        self.setMinimumHeight(290)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 28)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("confirmationCard")
+        self.card.setMinimumWidth(412)
+        root.addWidget(self.card)
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(32, 28, 32, 26)
+        card_layout.setSpacing(0)
+
+        icon_row = QHBoxLayout()
+        icon_row.addStretch()
+        self.question_badge = QLabel(self.card)
+        self.question_badge.setObjectName("confirmationQuestionBadge")
+        self.question_badge.setFixedSize(56, 56)
+        self.question_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.question_badge.setAccessibleName("确认操作")
+        icon_row.addWidget(self.question_badge)
+        icon_row.addStretch()
+        card_layout.addLayout(icon_row)
+        card_layout.addSpacing(16)
+
+        self.title_label = QLabel(title, self.card)
+        self.title_label.setObjectName("confirmationTitle")
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.title_label)
+        card_layout.addSpacing(8)
+
+        self.message = QLabel(text, self.card)
+        self.message.setObjectName("confirmationMessage")
+        self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message.setWordWrap(True)
+        self.message.setFixedWidth(344)
+        card_layout.addWidget(
+            self.message, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        card_layout.addSpacing(24)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(12)
+        button_row.addStretch()
+        self.no_button = QPushButton("No", self.card)
+        self.no_button.setObjectName("confirmationNoBtn")
+        self.no_button.setFixedSize(112, 40)
+        self.no_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.no_button.setDefault(True)
+        self.no_button.clicked.connect(self.reject)
+        button_row.addWidget(self.no_button)
+
+        self.yes_button = QPushButton("Yes", self.card)
+        self.yes_button.setObjectName("confirmationYesBtn")
+        self.yes_button.setFixedSize(112, 40)
+        self.yes_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.yes_button.clicked.connect(self.accept)
+        button_row.addWidget(self.yes_button)
+        button_row.addStretch()
+        card_layout.addLayout(button_row)
+
+        self._shadow = QGraphicsDropShadowEffect(self.card)
+        self._shadow.setBlurRadius(34)
+        self._shadow.setOffset(0, 8)
+        self.card.setGraphicsEffect(self._shadow)
+        self.apply_theme(theme)
+        self.adjustSize()
+
+    @classmethod
+    def ask(
+        cls,
+        parent: QWidget,
+        title: str,
+        text: str,
+        theme: str = "light",
+    ) -> bool:
+        dialog = cls(title, text, theme, parent)
+        try:
+            return dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            dialog.deleteLater()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.adjustSize()
+        self._center_on_parent()
+        self.no_button.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _center_on_parent(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        center = parent.mapToGlobal(parent.rect().center())
+        screen = parent.screen() or QApplication.primaryScreen()
+        x = center.x() - self.width() // 2
+        y = center.y() - self.height() // 2
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = max(
+                available.left(),
+                min(x, available.right() - self.width() + 1),
+            )
+            y = max(
+                available.top(),
+                min(y, available.bottom() - self.height() + 1),
+            )
+        self.move(x, y)
+
+    def apply_theme(self, theme: str) -> None:
+        self._theme = theme
+        palette = colors(theme)
+        self.card.setStyleSheet(
+            rounded_surface_qss(
+                theme, "QFrame#confirmationCard", "0px"
+            )
+            + f"""
+QFrame#confirmationCard {{
+    border-radius: 16px;
+}}
+QLabel#confirmationQuestionBadge {{
+    background: {palette['accent_soft']};
+    border: none;
+    border-radius: 28px;
+}}
+QLabel#confirmationTitle {{
+    color: {palette['fg']};
+    background: {palette['panel']};
+    font-size: 18px;
+    font-weight: 650;
+}}
+QLabel#confirmationMessage {{
+    color: {palette['fg_sub']};
+    background: {palette['panel']};
+    font-size: 13px;
+    line-height: 1.45;
+}}
+QPushButton#confirmationNoBtn,
+QPushButton#confirmationYesBtn {{
+    border-radius: 10px;
+    padding: 0;
+    font-weight: 600;
+}}
+QPushButton#confirmationNoBtn {{
+    color: {palette['fg_sub']};
+    background: {palette['panel']};
+    border: 1px solid {palette['border_strong']};
+}}
+QPushButton#confirmationNoBtn:hover {{
+    color: {palette['fg']};
+    background: {palette['hover']};
+    border-color: {palette['fg_muted']};
+}}
+QPushButton#confirmationNoBtn:pressed {{
+    background: {palette['selected']};
+    border-color: {palette['accent']};
+}}
+QPushButton#confirmationYesBtn {{
+    color: {palette['danger']};
+    background: {palette['danger_soft']};
+    border: 1px solid {palette['danger']};
+}}
+QPushButton#confirmationYesBtn:hover {{
+    color: #FFFFFF;
+    background: {palette['danger']};
+    border-color: {palette['danger']};
+}}
+QPushButton#confirmationYesBtn:pressed {{
+    color: #FFFFFF;
+    background: {palette['danger']};
+    border-color: {palette['fg']};
+}}
+"""
+        )
+        self.question_badge.setPixmap(
+            icon("question", palette["accent"], 28).pixmap(28, 28)
+        )
+        self._shadow.setColor(palette["shadow"])
 
 
 class NoticeDialog(QDialog):

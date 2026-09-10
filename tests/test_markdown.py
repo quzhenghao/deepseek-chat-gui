@@ -96,6 +96,22 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn("$inline_code$", rendered)
         self.assertIn("not_a_formula", rendered)
 
+    def test_renders_inline_code_and_copyable_fenced_code_block(self) -> None:
+        rendered = to_html(
+            "调用 `build_chat_body()`，然后执行：\n\n"
+            "```python\n"
+            "payload = {'model': 'deepseek-flash'}\n"
+            "print(payload)\n"
+            "```"
+        )
+        self.assertIn("<code>build_chat_body()</code>", rendered)
+        self.assertIn('data-code-block="true"', rendered)
+        self.assertIn('class="code-toolbar"', rendered)
+        self.assertIn('class="code-language">Python</span>', rendered)
+        self.assertIn('class="code-copy"', rendered)
+        self.assertIn("payload = {'model': 'deepseek-flash'}", rendered)
+        self.assertIn("overflow-x:auto", rendered)
+
     def test_unclosed_streaming_formula_stays_as_text(self) -> None:
         rendered = to_html(r"生成中：\[\sum_{i=1}^{n}")
         self.assertNotIn("data-tex=", rendered)
@@ -123,8 +139,8 @@ class MarkdownTests(unittest.TestCase):
 
     def test_dark_formula_markup_uses_dark_palette_without_raster_resources(self) -> None:
         rendered = to_html(r"\[x^2+y^2=z^2\]", dark=True)
-        self.assertIn("#F2F4F7", rendered)
-        self.assertIn("#202633", rendered)
+        self.assertIn("#F2F2F2", rendered)
+        self.assertIn("#242424", rendered)
         self.assertNotRegex(rendered, re.compile(r"data:image|<img|<canvas", re.I))
 
 

@@ -24,14 +24,19 @@ print(__version__)
 PY
 )"
 TAG="${RELEASE_TAG:-v${VERSION}}"
-DMG="$ROOT_DIR/release/DeepSeek-Chat-${VERSION}-macos-$(uname -m).dmg"
+DMG="$ROOT_DIR/release/DeepSeek-${VERSION}-macos-$(uname -m).dmg"
+NOTES_FILE="${RELEASE_NOTES_FILE:-$ROOT_DIR/CHANGELOG.md}"
 
 if [ ! -f "$DMG" ]; then
   echo "Missing ${DMG}. Run scripts/package_macos.sh first."
   exit 1
 fi
+if [ ! -f "$NOTES_FILE" ]; then
+  echo "Missing release notes: ${NOTES_FILE}"
+  exit 1
+fi
 
 echo ">> Creating GitHub release ${TAG} for ${REMOTE_URL}"
 gh release create "$TAG" "$DMG" \
-  --title "DeepSeek Chat ${VERSION}" \
-  --generate-notes
+  --title "DeepSeek ${VERSION}" \
+  --notes-file "$NOTES_FILE"

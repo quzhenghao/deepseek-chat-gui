@@ -14,10 +14,10 @@ from app.ui.theme import build_qss
 
 
 def main() -> int:
-    QApplication.setApplicationName("DeepSeek Chat")
-    QApplication.setOrganizationName("Local DeepSeek Chat")
+    QApplication.setApplicationName("DeepSeek")
+    QApplication.setOrganizationName("DeepSeek")
     app = QApplication(sys.argv)
-    app.setApplicationDisplayName("DeepSeek Chat")
+    app.setApplicationDisplayName("DeepSeek")
     app.setStyle("Fusion")
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     app.setWindowIcon(QIcon(str(ASSETS_DIR / "app-icon.png")))

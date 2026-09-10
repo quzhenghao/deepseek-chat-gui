@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -26,14 +29,27 @@ from .. import ASSETS_DIR
 from ..config import (
     DEFAULT_BASE_URL,
     EFFORT_LEVELS,
+    MAX_OUTPUT_TOKENS,
+    APP_DIR,
     effort_label,
-    include_unlisted_builtin_models,
+    normalize_official_models,
     model_label,
     uses_official_api,
 )
+from ..harness import (
+    HARNESS_DISPLAY_VERSION,
+    HARNESS_DOCS_URL,
+    HARNESS_REPOSITORY_URL,
+    bundled_harness_available,
+    find_node,
+    find_npx,
+    harness_home,
+)
 from .controls import NoWheelSpinBox, RoundedComboBox
-from .icons import apply_icon
+from .icons import apply_icon, tint_pixmap
 from .theme import SIDEBAR_DEFAULT_WIDTH, build_qss, colors
+
+NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 
 
 class SettingsPage(QWidget):
@@ -74,13 +90,20 @@ class SettingsPage(QWidget):
         brand_row = QHBoxLayout()
         brand_row.setContentsMargins(4, 0, 4, 0)
         brand_row.setSpacing(9)
-        mark = QLabel()
-        mark.setPixmap(QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(30, 30))
-        mark.setFixedSize(30, 30)
-        brand_row.addWidget(mark)
-        brand = QLabel("设置")
-        brand.setObjectName("settingsBrand")
-        brand_row.addWidget(brand)
+        self.brand_mark = QLabel()
+        self.brand_mark.setFixedSize(34, 34)
+        brand_row.addWidget(self.brand_mark)
+        self.brand_wordmark = QLabel("deepseek")
+        self.brand_wordmark.setObjectName("settingsBrandWordmark")
+        brand_row.addWidget(self.brand_wordmark, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.brand_badge = QLabel("CHAT")
+        self.brand_badge.setObjectName("brandBadge")
+        brand_row.addWidget(self.brand_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Compatibility label retained for consumers that used ``page.brand``.
+        self.brand = QLabel("DeepSeek")
+        self.brand.setObjectName("settingsBrand")
+        self.brand.setAccessibleName("DeepSeek")
+        self.brand.hide()
         brand_row.addStretch()
         sidebar_layout.addLayout(brand_row)
         sidebar_layout.addSpacing(18)
@@ -92,8 +115,10 @@ class SettingsPage(QWidget):
 
         self.basic_button = self._nav_button("基础配置")
         self.personalization_button = self._nav_button("个性化")
+        self.environment_button = self._nav_button("运行环境")
         sidebar_layout.addWidget(self.basic_button)
         sidebar_layout.addWidget(self.personalization_button)
+        sidebar_layout.addWidget(self.environment_button)
         sidebar_layout.addStretch()
 
         local_hint = QLabel("设置仅保存在当前电脑")
@@ -147,6 +172,7 @@ class SettingsPage(QWidget):
         self.content_stack.setObjectName("settingsContentStack")
         self.content_stack.addWidget(self._build_basic_page())
         self.content_stack.addWidget(self._build_personalization_page())
+        self.content_stack.addWidget(self._build_environment_page())
         right_layout.addWidget(self.content_stack, 1)
         root.addWidget(right, 1)
 
@@ -154,6 +180,7 @@ class SettingsPage(QWidget):
         self.navigation.setExclusive(True)
         self.navigation.addButton(self.basic_button, 0)
         self.navigation.addButton(self.personalization_button, 1)
+        self.navigation.addButton(self.environment_button, 2)
         self.navigation.idClicked.connect(self.select_section)
         self.select_section(0)
 
@@ -204,6 +231,12 @@ class SettingsPage(QWidget):
         self.show_key.toggled.connect(self._toggle_key)
         self.test_button = QPushButton("测试连接")
         self.test_button.clicked.connect(self._test_connection)
+        self.first_run_hint = QLabel(
+            "首次使用：填入 API 密钥 → 测试连接 → 保存设置，即可开始对话。"
+        )
+        self.first_run_hint.setObjectName("onboardingHint")
+        self.first_run_hint.setWordWrap(True)
+        connection_form.addRow("", self.first_run_hint)
         key_row = QHBoxLayout()
         key_row.setSpacing(6)
         key_row.addWidget(self.api_key, 1)
@@ -235,7 +268,7 @@ class SettingsPage(QWidget):
         generation_form.addRow("默认强度", self.default_effort)
 
         self.max_tokens = NoWheelSpinBox()
-        self.max_tokens.setRange(0, 384000)
+        self.max_tokens.setRange(0, MAX_OUTPUT_TOKENS)
         self.max_tokens.setSingleStep(1024)
         self.max_tokens.setSpecialValueText("使用模型默认值")
         generation_form.addRow("最大输出", self.max_tokens)
@@ -255,7 +288,7 @@ class SettingsPage(QWidget):
             "模型列表", "每行一个 API 模型 ID；测试连接成功时会自动同步。"
         )
         self.models_edit = QPlainTextEdit()
-        self.models_edit.setPlaceholderText("deepseek-v4-flash")
+        self.models_edit.setPlaceholderText("deepseek-flash")
         self.models_edit.setFixedHeight(104)
         self.models_edit.textChanged.connect(self._models_changed)
         models_form.addRow("模型 ID", self.models_edit)
@@ -306,6 +339,90 @@ class SettingsPage(QWidget):
         sections.addStretch()
         return scroll
 
+    def _build_environment_page(self) -> QWidget:
+        scroll, sections = self._content_host()
+
+        runtime, runtime_form = self._section(
+            "运行环境",
+            "查看客户端、Node.js 与官方 Harness 运行包状态。完整安装包会优先使用内置运行环境。",
+        )
+        self.environment_status = QLabel()
+        self.environment_status.setObjectName("environmentStatus")
+        self.environment_status.setWordWrap(True)
+        self.environment_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        runtime_form.addRow("当前状态", self.environment_status)
+
+        runtime_actions = QHBoxLayout()
+        runtime_actions.setSpacing(8)
+        self.refresh_environment_button = QPushButton("重新检测")
+        self.refresh_environment_button.clicked.connect(self._refresh_environment)
+        runtime_actions.addWidget(self.refresh_environment_button)
+        self.open_config_button = QPushButton("打开配置目录")
+        self.open_config_button.clicked.connect(self._open_config_directory)
+        runtime_actions.addWidget(self.open_config_button)
+        self.node_download_button = QPushButton("Node.js 更新入口")
+        self.node_download_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(NODE_DOWNLOAD_URL))
+        )
+        runtime_actions.addWidget(self.node_download_button)
+        runtime_actions.addStretch()
+        runtime_form.addRow("操作", runtime_actions)
+        sections.addWidget(runtime)
+
+        harness, harness_form = self._section(
+            "Harness 预热与项目",
+            "Harness 是官方开发者预览版。启动 Chat 后会在后台提前准备，让首次切换更顺畅。",
+        )
+        self.harness_warm_start = QCheckBox("启动时预热 Harness（推荐）")
+        harness_form.addRow("启动行为", self.harness_warm_start)
+
+        self.harness_projects_edit = QPlainTextEdit()
+        self.harness_projects_edit.setPlaceholderText(
+            "可选：每行一个项目目录；留空则使用当前工作目录"
+        )
+        self.harness_projects_edit.setFixedHeight(86)
+        project_row = QHBoxLayout()
+        project_row.setSpacing(8)
+        project_row.addWidget(self.harness_projects_edit, 1)
+        self.choose_project_button = QPushButton("选择目录")
+        self.choose_project_button.clicked.connect(self._choose_harness_project)
+        project_row.addWidget(self.choose_project_button, 0, Qt.AlignmentFlag.AlignTop)
+        harness_form.addRow("项目目录", project_row)
+
+        links = QHBoxLayout()
+        links.setSpacing(8)
+        self.harness_docs_button = QPushButton("官方文档")
+        self.harness_docs_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(HARNESS_DOCS_URL))
+        )
+        links.addWidget(self.harness_docs_button)
+        self.harness_repository_button = QPushButton("官方仓库")
+        self.harness_repository_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(HARNESS_REPOSITORY_URL))
+        )
+        links.addWidget(self.harness_repository_button)
+        links.addStretch()
+        harness_form.addRow("帮助", links)
+        sections.addWidget(harness)
+
+        note, note_form = self._section(
+            "安全提示",
+            "Harness 可能执行模型生成的命令或修改项目文件。请只授予必要的项目目录，并认真处理页面中的审批提示。",
+        )
+        note_label = QLabel(
+            f"数据目录：{harness_home()}\n"
+            "API 密钥通过进程环境传递给 Harness，不会写入 Harness 配置文件。"
+        )
+        note_label.setObjectName("hintLabel")
+        note_label.setWordWrap(True)
+        note_form.addRow("本地数据", note_label)
+        sections.addWidget(note)
+        sections.addStretch()
+        self._refresh_environment()
+        return scroll
+
     @staticmethod
     def _section(title: str, subtitle: str) -> tuple[QFrame, QFormLayout]:
         card = QFrame()
@@ -331,7 +448,7 @@ class SettingsPage(QWidget):
         return card, form
 
     def select_section(self, index: int) -> None:
-        if index not in {0, 1}:
+        if index not in {0, 1, 2}:
             return
         self.content_stack.setCurrentIndex(index)
         button = self.navigation.button(index) if hasattr(self, "navigation") else None
@@ -340,6 +457,7 @@ class SettingsPage(QWidget):
         titles = (
             ("基础配置", "管理 API、默认模型与界面外观"),
             ("个性化", "为每个新对话设置专属的系统提示词"),
+            ("运行环境", "检查 Harness 依赖、项目目录与启动行为"),
         )
         self.page_title.setText(titles[index][0])
         self.page_subtitle.setText(titles[index][1])
@@ -349,6 +467,7 @@ class SettingsPage(QWidget):
         self._cfg = dict(cfg)
         self._loading = True
         self.api_key.setText(str(cfg.get("api_key", "")))
+        self.first_run_hint.setVisible(not bool(str(cfg.get("api_key", "")).strip()))
         self.show_key.setChecked(False)
         self.base_url.setText(str(cfg.get("base_url", DEFAULT_BASE_URL)))
         self._fill_models(cfg.get("models", []), cfg.get("default_model", ""))
@@ -362,6 +481,12 @@ class SettingsPage(QWidget):
         self.models_edit.setPlainText("\n".join(cfg.get("models", [])))
         self.models_edit.blockSignals(False)
         self.system_prompt_edit.setPlainText(str(cfg.get("system_prompt", "")))
+        self.harness_warm_start.setChecked(bool(cfg.get("harness_warm_start", True)))
+        self.harness_projects_edit.blockSignals(True)
+        self.harness_projects_edit.setPlainText(
+            "\n".join(cfg.get("harness_projects", []))
+        )
+        self.harness_projects_edit.blockSignals(False)
         self._connection_state = None
         self.connection_status.setText("可先测试连接并同步账号可用模型")
         self._loading = False
@@ -385,6 +510,14 @@ class SettingsPage(QWidget):
             if value and value not in models:
                 models.append(value)
         return models
+
+    def _project_lines(self) -> list[str]:
+        projects: list[str] = []
+        for line in self.harness_projects_edit.toPlainText().splitlines():
+            value = str(Path(line.strip()).expanduser()) if line.strip() else ""
+            if value and value not in projects:
+                projects.append(value)
+        return projects
 
     def _models_changed(self) -> None:
         current = self.default_model.currentData()
@@ -448,13 +581,17 @@ class SettingsPage(QWidget):
                 return
             models = list(listed_models)
             if uses_official_api(self.base_url.text()):
-                models = include_unlisted_builtin_models(models)
+                models = normalize_official_models(models)
+                if not models:
+                    self._set_status(
+                        "连接成功，但账号没有返回当前客户端支持的模型",
+                        False,
+                    )
+                    return
             self.models_edit.setPlainText("\n".join(models))
-            extra_count = len(models) - len(listed_models)
-            if extra_count:
+            if uses_official_api(self.base_url.text()):
                 self._set_status(
-                    f"连接成功，已同步 {len(listed_models)} 个接口模型，"
-                    f"并保留 {extra_count} 个限时模型",
+                    f"连接成功，已同步 {len(models)} 个当前可用模型",
                     True,
                 )
             else:
@@ -487,6 +624,54 @@ class SettingsPage(QWidget):
 
     def _update_prompt_count(self) -> None:
         self.prompt_count.setText(f"{len(self.system_prompt_edit.toPlainText())} 字")
+
+    def _choose_harness_project(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择 Harness 项目目录",
+            str(Path.home()),
+        )
+        if not directory:
+            return
+        projects = self._project_lines()
+        if directory not in projects:
+            projects.append(directory)
+        self.harness_projects_edit.setPlainText("\n".join(projects))
+
+    def _open_config_directory(self) -> None:
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(APP_DIR)))
+
+    def _refresh_environment(self) -> None:
+        node = find_node()
+        npx = find_npx()
+        node_version = "未找到"
+        if node:
+            try:
+                result = subprocess.run(
+                    [node, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+                node_version = result.stdout.strip() or "可执行"
+            except (OSError, subprocess.SubprocessError):
+                node_version = "可执行"
+        harness_state = (
+            f"已内置（{HARNESS_DISPLAY_VERSION}）"
+            if bundled_harness_available()
+            else f"按需准备（{HARNESS_DISPLAY_VERSION}）"
+        )
+        self.environment_status.setText(
+            f"Node.js：{node_version}\n"
+            f"npx：{npx or '未找到'}\n"
+            f"Harness：{harness_state}\n"
+            f"应用数据：{APP_DIR}"
+        )
 
     def _show_validation(self, text: str) -> None:
         self.validation_status.setText(text)
@@ -533,6 +718,8 @@ class SettingsPage(QWidget):
             "max_tokens": self.max_tokens.value(),
             "theme": self.theme_combo.currentData(),
             "system_prompt": self.system_prompt_edit.toPlainText().strip(),
+            "harness_projects": self._project_lines(),
+            "harness_warm_start": self.harness_warm_start.isChecked(),
         }
 
     def _apply_icons(self) -> None:
@@ -541,11 +728,27 @@ class SettingsPage(QWidget):
         apply_icon(self.show_key, name, palette["fg_sub"], 18)
         apply_icon(self.basic_button, "settings", palette["fg_sub"], 18)
         apply_icon(self.personalization_button, "sparkle", palette["fg_sub"], 18)
+        apply_icon(self.environment_button, "refresh", palette["fg_sub"], 18)
         apply_icon(self.back_button, "arrow-left", palette["fg_sub"], 18)
 
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         self.setStyleSheet(build_qss(theme))
+        palette = colors(theme)
+        self.brand_mark.setPixmap(
+            tint_pixmap(
+                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(34, 34),
+                palette["fg"],
+            )
+        )
+        self.brand_wordmark.setStyleSheet(
+            f"color:{palette['fg']};background:transparent;"
+            "font-size:22px;font-weight:650;"
+        )
+        self.brand_badge.setStyleSheet(
+            "color:#FFFFFF;background:#171717;border-radius:4px;"
+            "padding:3px 6px 2px 6px;font-size:10px;font-weight:750;"
+        )
         self.default_model.set_theme(theme)
         self.default_effort.set_theme(theme)
         self.theme_combo.set_theme(theme)

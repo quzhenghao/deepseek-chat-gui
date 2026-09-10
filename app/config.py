@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,41 +18,48 @@ DATA_PATH = APP_DIR / "conversations.json"
 MEDIA_DIR = APP_DIR / "media"
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-MODEL_CATALOG_VERSION = 2
-V41_FLASH_LIMITED_MODEL = "deepseek-v4.1-flash-expires-on-0910"
-UNLISTED_BUILTIN_MODELS = (V41_FLASH_LIMITED_MODEL,)
-DEFAULT_MODELS = [
-    "deepseek-v4-flash",
-    V41_FLASH_LIMITED_MODEL,
+MODEL_CATALOG_VERSION = 3
+# The current first-party Harness adapter caps its default output at 256k
+# tokens. Keeping the native settings limit in sync avoids generating a
+# request the official integration would reject before it reaches the model.
+MAX_OUTPUT_TOKENS = 256_000
+
+# DeepSeek's current unified Flash route is returned by the official
+# ``/models`` endpoint as ``deepseek-flash``.  The service currently exposes
+# text and image input through this route and supports the four thinking
+# states below.  Keep this catalog deliberately small: a model ID that is no
+# longer returned by the official endpoint must not remain as a built-in
+# choice merely because an older local config mentioned it.
+V41_FLASH_MODEL = "deepseek-flash"
+DEFAULT_MODELS = [V41_FLASH_MODEL]
+MODEL_LABELS = {V41_FLASH_MODEL: "DeepSeek V4.1 Flash"}
+
+# IDs from the previous catalog. The desktop client owns this migration
+# globally so a retired Pro route cannot remain selectable through a stale
+# local config or a manually pasted model list. Unrelated custom-gateway IDs
+# are still retained when they do not match one of these retired aliases.
+REMOVED_OFFICIAL_MODELS = {
     "deepseek-v4-pro",
+    "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
-]
-MODEL_LABELS = {
-    "deepseek-v4-flash": "DeepSeek V4 Flash",
-    V41_FLASH_LIMITED_MODEL: "DeepSeek V4.1 Flash（限时至 9/10）",
-    "deepseek-v4-pro": "DeepSeek V4 Pro",
-    "deepseek-v4-flash-vision-exp": "DeepSeek V4 Vision",
+}
+LEGACY_MODEL_ALIASES = {
+    "deepseek-v4.1-flash-expires-on-0910": V41_FLASH_MODEL,
+    "deepseek-v41-flash": V41_FLASH_MODEL,
+    "deepseek-v4-flash": V41_FLASH_MODEL,
+    "deepseek-v4-flash-vision-exp": V41_FLASH_MODEL,
+    "deepseek-v4-flash (modlens vision)": V41_FLASH_MODEL,
+    "deepseek-v4-pro (modlens vision)": V41_FLASH_MODEL,
+}
+_COMPACT_LEGACY_MODEL_ALIASES = {
+    re.sub(r"\s+", "-", key): target
+    for key, target in LEGACY_MODEL_ALIASES.items()
 }
 EFFORT_LEVELS = ["low", "high", "max"]
 EFFORT_LABELS = {"low": "Low", "high": "High", "max": "Max"}
 
 MODEL_CAPABILITIES = {
-    "deepseek-v4-flash": {
-        "vision": False,
-        "thinking": True,
-        "efforts": tuple(EFFORT_LEVELS),
-    },
-    V41_FLASH_LIMITED_MODEL: {
-        "vision": True,
-        "thinking": True,
-        "efforts": tuple(EFFORT_LEVELS),
-    },
-    "deepseek-v4-pro": {
-        "vision": False,
-        "thinking": True,
-        "efforts": tuple(EFFORT_LEVELS),
-    },
-    "deepseek-v4-flash-vision-exp": {
+    V41_FLASH_MODEL: {
         "vision": True,
         "thinking": True,
         "efforts": tuple(EFFORT_LEVELS),
@@ -72,6 +80,8 @@ DEFAULTS: dict[str, Any] = {
     "max_tokens": 0,
     "theme": "light",
     "system_prompt": "",
+    "harness_projects": [],
+    "harness_warm_start": True,
 }
 
 
@@ -111,7 +121,16 @@ def uses_official_api(base_url: Any) -> bool:
     return value in {DEFAULT_BASE_URL, f"{DEFAULT_BASE_URL}/v1"}
 
 
-def include_unlisted_builtin_models(models: Any) -> list[str]:
+def normalize_official_models(models: Any) -> list[str]:
+    """Normalize a live official model response for the app's built-in catalog.
+
+    The endpoint is authoritative for availability, while the client owns the
+    user-facing aliases/capabilities.  We retain the current Flash route and
+    silently omit explicitly retired routes.  Unknown future IDs are kept as
+    manual choices so an account can still use a newly published route before
+    a client release updates its capability metadata.
+    """
+
     if isinstance(models, str):
         source = models.splitlines()
     else:
@@ -121,32 +140,21 @@ def include_unlisted_builtin_models(models: Any) -> list[str]:
         model = _normalize_model(item)
         if model and model not in merged:
             merged.append(model)
-    if not merged:
-        return list(DEFAULT_MODELS)
-    for model in UNLISTED_BUILTIN_MODELS:
-        if model in merged:
-            continue
-        try:
-            position = merged.index("deepseek-v4-flash") + 1
-        except ValueError:
-            position = len(merged)
-        merged.insert(position, model)
     return merged
 
 
 def _normalize_model(model: Any) -> str:
     value = str(model or "").strip()
     lowered = value.lower().replace("_", "-")
-    # 兼容 1.x 配置中的展示名和无效视觉别名。
-    aliases = {
-        "deepseek-v4-flash": "deepseek-v4-flash",
-        V41_FLASH_LIMITED_MODEL: V41_FLASH_LIMITED_MODEL,
-        "deepseek-v4-pro": "deepseek-v4-pro",
-        "deepseek-v4-flash-vision-exp": "deepseek-v4-flash-vision-exp",
-        "deepseek-v4-flash (modlens vision)": "deepseek-v4-flash-vision-exp",
-        "deepseek-v4-pro (modlens vision)": "deepseek-v4-flash-vision-exp",
-    }
-    return aliases.get(lowered, value)
+    # 兼容旧版本展示名、临时 0910 ID 和旧视觉别名。
+    if lowered in LEGACY_MODEL_ALIASES:
+        return LEGACY_MODEL_ALIASES[lowered]
+    compacted = re.sub(r"\s+", "-", lowered)
+    if compacted in _COMPACT_LEGACY_MODEL_ALIASES:
+        return _COMPACT_LEGACY_MODEL_ALIASES[compacted]
+    if compacted in REMOVED_OFFICIAL_MODELS:
+        return ""
+    return value
 
 
 def _normalize_effort(value: Any) -> str:
@@ -185,12 +193,22 @@ def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         cfg["temperature"] = 1.0
     try:
-        cfg["max_tokens"] = min(384000, max(0, int(cfg.get("max_tokens", 0))))
+        cfg["max_tokens"] = min(MAX_OUTPUT_TOKENS, max(0, int(cfg.get("max_tokens", 0))))
     except (TypeError, ValueError):
         cfg["max_tokens"] = 0
     cfg["theme"] = "dark" if cfg.get("theme") == "dark" else "light"
     cfg["api_key"] = str(cfg.get("api_key") or "").strip()
     cfg["system_prompt"] = str(cfg.get("system_prompt") or "").strip()
+    raw_projects = cfg.get("harness_projects") or []
+    if isinstance(raw_projects, str):
+        raw_projects = raw_projects.splitlines()
+    projects: list[str] = []
+    for item in raw_projects:
+        path = str(item or "").strip()
+        if path and path not in projects:
+            projects.append(path)
+    cfg["harness_projects"] = projects
+    cfg["harness_warm_start"] = bool(cfg.get("harness_warm_start", True))
     cfg["model_catalog_version"] = MODEL_CATALOG_VERSION
     return cfg
 
@@ -214,17 +232,21 @@ def load_config() -> dict[str, Any]:
                     saved_catalog_version < MODEL_CATALOG_VERSION
                     and uses_official_api(cfg.get("base_url"))
                 ):
-                    cfg["models"] = include_unlisted_builtin_models(
-                        cfg.get("models")
-                    )
+                    cfg["models"] = normalize_official_models(cfg.get("models"))
         except (OSError, json.JSONDecodeError):
             pass
     return _sanitize(cfg)
 
 
+def sanitize_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return an in-memory config normalized to the current app catalog."""
+
+    return _sanitize(dict(cfg))
+
+
 def save_config(cfg: dict[str, Any]) -> None:
     ensure_dir()
-    clean = _sanitize(dict(cfg))
+    clean = sanitize_config(cfg)
     temporary = CONFIG_PATH.with_suffix(".tmp")
     temporary.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(CONFIG_PATH)
