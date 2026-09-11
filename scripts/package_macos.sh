@@ -31,8 +31,6 @@ else
 fi
 "$PYTHON_BIN" -m PyInstaller --clean --noconfirm "$SPEC_FILE"
 
-# PyInstaller treats the embedded Node executable as an application resource;
-# restore its execute bit after collection so QProcess can launch it directly.
 HARNESS_NODE="$DIST_APP/Contents/Resources/vendor/harness/node/bin/node"
 if [ -f "$HARNESS_NODE" ]; then
   chmod +x "$HARNESS_NODE"

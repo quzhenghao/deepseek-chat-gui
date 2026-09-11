@@ -25,7 +25,7 @@ PY
 )"
 TAG="${RELEASE_TAG:-v${VERSION}}"
 DMG="$ROOT_DIR/release/DeepSeek-${VERSION}-macos-$(uname -m).dmg"
-NOTES_FILE="${RELEASE_NOTES_FILE:-$ROOT_DIR/CHANGELOG.md}"
+NOTES_FILE="${RELEASE_NOTES_FILE:-$ROOT_DIR/update.md}"
 
 if [ ! -f "$DMG" ]; then
   echo "Missing ${DMG}. Run scripts/package_macos.sh first."

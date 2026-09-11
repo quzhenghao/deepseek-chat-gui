@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import json
-from math import ceil, cos, pi, sin
+from math import ceil
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -10,6 +10,7 @@ from PySide6.QtCore import (
     QEvent,
     QObject,
     QPointF,
+    QRectF,
     Qt,
     QTimer,
     QUrl,
@@ -17,10 +18,14 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import (
+    QBrush,
     QColor,
+    QConicalGradient,
     QDesktopServices,
+    QGuiApplication,
     QIcon,
     QImage,
+    QPen,
     QPainter,
     QPixmap,
     QTextDocument,
@@ -46,7 +51,7 @@ from PySide6.QtWidgets import (
 
 from .. import ASSETS_DIR
 from ..markdown import to_html
-from .controls import RoundedMenu
+from .controls import build_flat_menu
 from .icons import apply_icon, tint_pixmap
 from .theme import colors
 
@@ -55,6 +60,9 @@ IMAGE_MAX_HEIGHT = 180
 IMAGE_MAX_WIDTH = 250
 LANE_MAX_WIDTH = 840
 KATEX_DIR = ASSETS_DIR / "vendor" / "katex"
+
+WEB_SURFACE_TEXTURE_LIMIT = 8192
+WEB_SURFACE_MAX_HEIGHT = 6000
 
 
 _MATH_WEB_SHELL = r"""<!doctype html>
@@ -80,7 +88,10 @@ _MATH_WEB_SHELL = r"""<!doctype html>
       margin: 0;
       padding: 0;
       background: transparent;
+      cursor: text;
     }
+    html, body { cursor: text; }
+    a, button, .code-copy { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -96,6 +107,18 @@ _MATH_WEB_SHELL = r"""<!doctype html>
         1,
         Math.ceil(root.getBoundingClientRect().height)
       );
+
+      // When the host clamps this surface (very long answers or reasoning),
+      // the page keeps the overflow itself instead of forwarding wheel events
+      // to the outer message lane, so nothing becomes unreachable.
+      let internalScroll = false;
+      const syncScrollMode = () => {
+        internalScroll = measuredHeight() > window.innerHeight + 2;
+        const value = internalScroll ? "auto" : "hidden";
+        document.documentElement.style.overflowY = value;
+        document.body.style.overflowY = value;
+        return internalScroll;
+      };
 
       const refreshOverflow = () => {
         root.querySelectorAll(".math-display-shell").forEach((shell) => {
@@ -117,6 +140,7 @@ _MATH_WEB_SHELL = r"""<!doctype html>
 
       const reportLayout = () => {
         refreshOverflow();
+        syncScrollMode();
         const height = measuredHeight();
         if (bridge) bridge.reportHeight(height);
         return height;
@@ -182,7 +206,16 @@ _MATH_WEB_SHELL = r"""<!doctype html>
       }
 
       new ResizeObserver(() => requestAnimationFrame(reportLayout)).observe(root);
+      window.addEventListener("resize", () => requestAnimationFrame(reportLayout));
       document.addEventListener("wheel", (event) => {
+        if (internalScroll) {
+          const maxScroll = Math.max(0, measuredHeight() - window.innerHeight);
+          const atEdge = (event.deltaY < 0 && window.scrollY <= 0)
+            || (event.deltaY > 0 && window.scrollY >= maxScroll - 1);
+          // Keep scrolling inside a clamped block until it reaches an edge,
+          // then hand the gesture back to the message lane.
+          if (!atEdge) return;
+        }
         const horizontalRegion = event.target instanceof Element
           ? event.target.closest(
               ".math-display-shell, .math-inline.is-overflowing"
@@ -240,6 +273,7 @@ class _MathWebView(QWebEngineView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setProperty("skipCustomTooltipScan", True)
+        self._disposed = False
         self._ready = False
         self._pending_html = ""
         self._generation = 0
@@ -247,6 +281,7 @@ class _MathWebView(QWebEngineView):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(22)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
         self.setStyleSheet("background:transparent;border:none;")
 
         page = _MathPage(self)
@@ -274,29 +309,38 @@ class _MathWebView(QWebEngineView):
         self._bridge = _MathBridge(self)
         self._bridge.heightReported.connect(self._apply_content_height)
         self._bridge.verticalScrollRequested.connect(self._forward_vertical_scroll)
-        self._bridge.copyRequested.connect(
-            lambda text: QApplication.clipboard().setText(text)
-        )
+        self._copy_to_clipboard = lambda text: QApplication.clipboard().setText(text)
+        self._bridge.copyRequested.connect(self._copy_to_clipboard)
         self._channel = QWebChannel(page)
         self._channel.registerObject("mathBridge", self._bridge)
         page.setWebChannel(self._channel)
         self.loadFinished.connect(self._on_load_finished)
+        self._layout_refresh_timer = QTimer(self)
+        self._layout_refresh_timer.setSingleShot(True)
+        self._layout_refresh_timer.setInterval(50)
+        self._layout_refresh_timer.timeout.connect(self._refresh_web_layout)
 
         base_url = QUrl.fromLocalFile(f"{KATEX_DIR.resolve()}/")
         self.setHtml(_MATH_WEB_SHELL, base_url)
 
     def set_content(self, body: str) -> None:
+        if self._disposed:
+            return
         self._pending_html = body
         self._generation += 1
         if self._ready:
             self._render_pending_content()
 
     def _on_load_finished(self, succeeded: bool) -> None:
+        if self._disposed:
+            return
         self._ready = succeeded
         if succeeded:
             self._render_pending_content()
 
     def _render_pending_content(self) -> None:
+        if self._disposed or not self._ready or self.page() is None:
+            return
         generation = self._generation
         payload = json.dumps(self._pending_html)
         script = f"window.setDeepSeekContent({payload})"
@@ -306,7 +350,7 @@ class _MathWebView(QWebEngineView):
         )
 
     def _content_applied(self, generation: int, height) -> None:
-        if generation != self._generation:
+        if self._disposed or generation != self._generation:
             return
         if isinstance(height, (int, float)):
             self._apply_content_height(round(height))
@@ -316,10 +360,26 @@ class _MathWebView(QWebEngineView):
 
     @Slot(int)
     def _apply_content_height(self, height: int) -> None:
-        height = max(22, min(int(height) + 1, 100_000))
-        if abs(self.height() - height) > 1:
-            self.setFixedHeight(height)
-            self.contentHeightChanged.emit(height)
+        if self._disposed:
+            return
+        natural = max(22, min(int(height) + 1, 100_000))
+        target = min(natural, self._surface_height_limit())
+        if abs(self.height() - target) > 1:
+            self.setFixedHeight(target)
+            self.contentHeightChanged.emit(target)
+
+    def _surface_height_limit(self) -> int:
+        """Largest safe inline surface, in logical pixels, for the screen."""
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
+        return max(
+            1200,
+            min(
+                WEB_SURFACE_MAX_HEIGHT,
+                int(WEB_SURFACE_TEXTURE_LIMIT / max(1.0, ratio)),
+            ),
+        )
 
     @Slot(float)
     def _forward_vertical_scroll(self, delta: float) -> None:
@@ -331,10 +391,132 @@ class _MathWebView(QWebEngineView):
         scroll_bar = ancestor.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.value() + round(delta))
 
+    def focusOutEvent(self, event) -> None:
+        if event.reason() == Qt.FocusReason.MouseFocusReason:
+            self.clear_selection()
+        super().focusOutEvent(event)
+
+    def clear_selection(self) -> None:
+        if self._disposed:
+            return
+        page = self.page()
+        if page is not None:
+            page.triggerAction(QWebEnginePage.WebAction.Unselect)
+
+    def contextMenuEvent(self, event) -> None:
+        """Flat menu with the standard actions Chromium offers in-page."""
+
+        page = self.page()
+        if self._disposed or page is None:
+            return
+        request = self.lastContextMenuRequest()
+        selected = (request.selectedText() or "") if request is not None else ""
+        link = ""
+        if request is not None:
+            url = request.linkUrl()
+            link = url.toString() if url.isValid() and not url.isEmpty() else ""
+
+        menu = build_flat_menu(self)
+        copy_action = menu.addAction("复制")
+        copy_action.setEnabled(bool(selected.strip()))
+        link_action = menu.addAction("复制链接地址") if link else None
+        menu.addSeparator()
+        select_all_action = menu.addAction("全选")
+        chosen = menu.exec(event.globalPos())
+        menu.deleteLater()
+        if chosen is None:
+            return
+        if chosen is copy_action:
+            QApplication.clipboard().setText(selected)
+        elif link_action is not None and chosen is link_action:
+            QApplication.clipboard().setText(link)
+        elif chosen is select_all_action and page is not None:
+            page.triggerAction(QWebEnginePage.WebAction.SelectAll)
+
     def resizeEvent(self, event) -> None:
+        limit = self._surface_height_limit()
+        if self.height() > limit:
+            self.setFixedHeight(limit)
         super().resizeEvent(event)
-        if self._ready:
-            self.page().runJavaScript("window.refreshDeepSeekLayout()")
+        if self._ready and not self._disposed and not self._layout_refresh_timer.isActive():
+            self._layout_refresh_timer.start()
+
+    def _refresh_web_layout(self) -> None:
+        if self._disposed or not self._ready:
+            return
+        page = self.page()
+        if page is not None:
+            page.runJavaScript("window.refreshDeepSeekLayout()")
+
+    def dispose(self) -> None:
+        """Stop callbacks and discard the renderer before deferred deletion."""
+
+        if self._disposed:
+            return
+        self._disposed = True
+        self._ready = False
+        self._generation += 1
+        self._layout_refresh_timer.stop()
+        try:
+            self.loadFinished.disconnect(self._on_load_finished)
+        except (RuntimeError, TypeError):
+            pass
+        for signal, slot in (
+            (self._bridge.heightReported, self._apply_content_height),
+            (self._bridge.verticalScrollRequested, self._forward_vertical_scroll),
+            (self._bridge.copyRequested, self._copy_to_clipboard),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+        self.hide()
+        page = self.page()
+        if page is not None:
+            try:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Discarded)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+        self.deleteLater()
+
+
+class MessageTextBrowser(QTextBrowser):
+    """Read-only message text whose right-click menu stays a flat panel."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+
+    def focusOutEvent(self, event) -> None:
+        if event.reason() == Qt.FocusReason.MouseFocusReason:
+            self.clear_selection()
+        super().focusOutEvent(event)
+
+    def clear_selection(self) -> None:
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            cursor.clearSelection()
+            self.setTextCursor(cursor)
+
+    def contextMenuEvent(self, event) -> None:
+        menu = build_flat_menu(self)
+        copy_action = menu.addAction("复制")
+        copy_action.setEnabled(self.textCursor().hasSelection())
+        link = self.anchorAt(event.pos())
+        link_action = menu.addAction("复制链接地址") if link else None
+        menu.addSeparator()
+        select_all_action = menu.addAction("全选")
+        chosen = menu.exec(event.globalPos())
+        menu.deleteLater()
+        if chosen is None:
+            return
+        if chosen is copy_action:
+            self.copy()
+        elif link_action is not None and chosen is link_action:
+            QApplication.clipboard().setText(link)
+        elif chosen is select_all_action:
+            self.selectAll()
 
 
 class RichText(QWidget):
@@ -351,7 +533,7 @@ class RichText(QWidget):
 
         self._stack = QStackedLayout(self)
         self._stack.setContentsMargins(0, 0, 0, 0)
-        self._text_view = QTextBrowser()
+        self._text_view = MessageTextBrowser()
         self._text_view.setFrameShape(QFrame.Shape.NoFrame)
         self._text_view.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -370,6 +552,23 @@ class RichText(QWidget):
         self._fit_timer.timeout.connect(self._fit_text_height)
         self._text_view.document().contentsChanged.connect(self._schedule_fit)
 
+    def dispose(self) -> None:
+        """Retire any Chromium surface before its owning bubble is deleted."""
+
+        self._fit_timer.stop()
+        web_view = self._web_view
+        if web_view is None:
+            return
+        self._web_view = None
+        self._stack.removeWidget(web_view)
+        web_view.dispose()
+
+    def clear_selection(self) -> None:
+        if self._uses_math and self._web_view is not None:
+            self._web_view.clear_selection()
+        else:
+            self._text_view.clear_selection()
+
     def document(self) -> QTextDocument:
         """Retain the former QTextBrowser API for non-math callers and tests."""
 
@@ -377,14 +576,13 @@ class RichText(QWidget):
 
     def set_html(self, body: str) -> None:
         self._html = body
-        # Math and code blocks both benefit from the local WebEngine renderer:
-        # KaTeX needs DOM layout, while code blocks use a real copy button and
-        # the same WebChannel clipboard bridge.
         self._uses_math = "data-tex=" in body or "data-code-block=" in body
-        self._text_view.setHtml(body)
         if self._uses_math:
             self._ensure_web_view().set_content(body)
         else:
+            if self._web_view is not None:
+                self.dispose()
+            self._text_view.setHtml(body)
             self._stack.setCurrentWidget(self._text_view)
             self._schedule_fit()
 
@@ -431,6 +629,12 @@ class RichText(QWidget):
 
 
 class ThinkingIndicator(QWidget):
+    """Rotating progress glyph shown while a reply is still thinking."""
+
+    RADIUS = 6.4
+    STROKE = 2.0
+    ARC_SWEEP = -104.0
+
     def __init__(self, theme: str = "light", parent=None) -> None:
         super().__init__(parent)
         self._theme = theme
@@ -469,18 +673,7 @@ class ThinkingIndicator(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         accent = QColor(colors(self._theme)["accent"])
         if self._running:
-            center = QPointF(10, 10)
-            for index in range(3):
-                angle = (self._angle - index * 95) * pi / 180
-                point = QPointF(
-                    center.x() + cos(angle) * 5.4,
-                    center.y() + sin(angle) * 5.4,
-                )
-                dot = QColor(accent)
-                dot.setAlpha(255 - index * 65)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(dot)
-                painter.drawEllipse(point, 2.1 - index * 0.25, 2.1 - index * 0.25)
+            self._paint_arc(painter, accent)
         else:
             painter.setPen(accent)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -489,6 +682,37 @@ class ThinkingIndicator(QWidget):
             painter.drawLine(QPointF(5.2, 5.2), QPointF(14.8, 14.8))
             painter.drawLine(QPointF(14.8, 5.2), QPointF(5.2, 14.8))
         painter.end()
+
+    def _paint_arc(self, painter: QPainter, accent: QColor) -> None:
+        """Draw a tapered ring: faint track plus a bright, trailing head."""
+
+        painter.save()
+        painter.translate(10.0, 10.0)
+        painter.rotate(self._angle)
+        track = QColor(accent)
+        track.setAlpha(48)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(track, self.STROKE))
+        painter.drawEllipse(QPointF(0.0, 0.0), self.RADIUS, self.RADIUS)
+
+        head = QColor(accent)
+        tail = QColor(accent)
+        tail.setAlpha(0)
+        gradient = QConicalGradient(QPointF(0.0, 0.0), 90.0)
+        gradient.setColorAt(0.0, tail)
+        gradient.setColorAt(1.0 - abs(self.ARC_SWEEP) / 360.0, head)
+        gradient.setColorAt(1.0, tail)
+        arc_pen = QPen(QBrush(gradient), self.STROKE)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc_pen)
+        rect = QRectF(
+            -self.RADIUS,
+            -self.RADIUS,
+            self.RADIUS * 2,
+            self.RADIUS * 2,
+        )
+        painter.drawArc(rect, 90 * 16, int(self.ARC_SWEEP * 16))
+        painter.restore()
 
 
 class ReasoningPanel(QFrame):
@@ -505,6 +729,7 @@ class ReasoningPanel(QFrame):
         self.setObjectName("reasoningPanel")
         self._theme = theme
         self._reasoning = reasoning
+        self._rendered_reasoning: str | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 7, 10, 8)
@@ -532,10 +757,13 @@ class ReasoningPanel(QFrame):
         self.apply_theme(theme)
 
     def set_reasoning(self, reasoning: str) -> None:
+        if reasoning == self._rendered_reasoning:
+            return
         self._reasoning = reasoning
         self.reasoning_view.set_html(
             to_html(reasoning, dark=self._theme == "dark")
         )
+        self._rendered_reasoning = reasoning
 
     def set_running(self, running: bool) -> None:
         if running:
@@ -557,12 +785,13 @@ class ReasoningPanel(QFrame):
         apply_icon(self.toggle, name, palette["fg_sub"], 16)
 
     def apply_theme(self, theme: str) -> None:
+        theme_changed = theme != self._theme
         self._theme = theme
         palette = colors(theme)
         self.indicator.set_theme(theme)
-        self.reasoning_view.set_html(
-            to_html(self._reasoning, dark=theme == "dark")
-        )
+        if theme_changed:
+            self._rendered_reasoning = None
+            self.set_reasoning(self._reasoning)
         self.reasoning_view.setStyleSheet(
             f"background:transparent;color:{palette['fg_sub']};border:none;"
         )
@@ -606,19 +835,21 @@ class MessageBubble(QWidget):
         super().__init__(parent)
         self._theme = theme
         self._plain = ""
+        self._disposed = False
 
     def plain_text(self) -> str:
         return self._plain
 
+    def dispose(self) -> None:
+        """Release expensive child surfaces before the bubble is deleted."""
+
+        self._disposed = True
+
+    def clear_selection(self) -> None:
+        pass
+
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
-
-    def contextMenuEvent(self, event) -> None:
-        menu = RoundedMenu(self._theme, self)
-        copy_action = menu.addAction("复制内容")
-        copy_action.setEnabled(bool(self._plain.strip()))
-        if menu.exec(event.globalPos()) is copy_action:
-            QApplication.clipboard().setText(self._plain)
 
 
 class UserBubble(MessageBubble):
@@ -687,6 +918,10 @@ class UserBubble(MessageBubble):
                 f"background:transparent;color:{palette['fg']};border:none;"
             )
 
+    def clear_selection(self) -> None:
+        if hasattr(self, "text_view"):
+            self.text_view.clear_selection()
+
 
 class AssistantBubble(MessageBubble):
     role = "assistant"
@@ -706,6 +941,8 @@ class AssistantBubble(MessageBubble):
         self._plain = content
         self._reasoning = reasoning
         self._streaming = streaming
+        self._answer_started = bool(content)
+        self._content_dirty = bool(content)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 10, 24, 10)
@@ -776,10 +1013,9 @@ class AssistantBubble(MessageBubble):
         self.actions.setVisible(bool(content) and not streaming)
         column.addWidget(self.actions)
 
-        # 合并高频 token 更新，减少富文本重排和闪烁。
         self._content_timer = QTimer(self)
         self._content_timer.setSingleShot(True)
-        self._content_timer.setInterval(35)
+        self._content_timer.setInterval(60)
         self._content_timer.timeout.connect(self._render_content)
         self._reasoning_timer = QTimer(self)
         self._reasoning_timer.setSingleShot(True)
@@ -795,7 +1031,28 @@ class AssistantBubble(MessageBubble):
             self.status_row.hide()
         self.apply_theme(theme)
 
+    def dispose(self) -> None:
+        """Stop timers and retire any embedded WebEngine renderers."""
+
+        if self._disposed:
+            return
+        self._disposed = True
+        self._content_timer.stop()
+        self._reasoning_timer.stop()
+        self.status_indicator.stop()
+        if self.reasoning_panel is not None:
+            self.reasoning_panel.indicator.stop()
+            self.reasoning_panel.reasoning_view.dispose()
+        self.content_view.dispose()
+
+    def clear_selection(self) -> None:
+        self.content_view.clear_selection()
+        if self.reasoning_panel is not None:
+            self.reasoning_panel.reasoning_view.clear_selection()
+
     def set_reasoning(self, reasoning: str) -> None:
+        if self._disposed:
+            return
         self._reasoning = reasoning
         if self.reasoning_panel is None:
             self.reasoning_panel = ReasoningPanel(
@@ -811,10 +1068,15 @@ class AssistantBubble(MessageBubble):
             self._reasoning_timer.start()
 
     def _render_reasoning(self) -> None:
-        if self.reasoning_panel:
+        if not self._disposed and self.reasoning_panel:
             self.reasoning_panel.set_reasoning(self._reasoning)
 
     def begin_answer(self) -> None:
+        if self._disposed:
+            return
+        if self._answer_started:
+            return
+        self._answer_started = True
         if self.reasoning_panel:
             self.reasoning_panel.set_running(False)
         self.status_indicator.stop()
@@ -822,17 +1084,25 @@ class AssistantBubble(MessageBubble):
         self.content_view.show()
 
     def set_content(self, content: str) -> None:
+        if self._disposed:
+            return
         self._plain = content
+        self._content_dirty = True
         self.begin_answer()
         if not self._content_timer.isActive():
             self._content_timer.start()
 
     def _render_content(self) -> None:
+        if self._disposed or not self._content_dirty:
+            return
+        self._content_dirty = False
         self.content_view.set_html(
             to_html(self._plain, dark=self._theme == "dark")
         )
 
     def finish(self, stopped: bool = False) -> None:
+        if self._disposed:
+            return
         self._streaming = False
         self._content_timer.stop()
         self._reasoning_timer.stop()
@@ -847,6 +1117,8 @@ class AssistantBubble(MessageBubble):
         self.actions.setVisible(bool(self._plain))
 
     def fail(self, message: str) -> None:
+        if self._disposed:
+            return
         self.finish()
         self.completion_label.setText(message)
         self.completion_label.setStyleSheet(
@@ -855,6 +1127,9 @@ class AssistantBubble(MessageBubble):
         self.actions.show()
 
     def apply_theme(self, theme: str) -> None:
+        if self._disposed:
+            return
+        theme_changed = theme != self._theme
         super().apply_theme(theme)
         palette = colors(theme)
         self.avatar.setPixmap(
@@ -867,7 +1142,8 @@ class AssistantBubble(MessageBubble):
         self.content_view.setStyleSheet(
             f"background:transparent;color:{palette['fg']};border:none;"
         )
-        if self._plain:
+        if self._plain and (theme_changed or self._content_dirty):
+            self._content_dirty = True
             self._render_content()
         if self.reasoning_panel:
             self.reasoning_panel.apply_theme(theme)
@@ -911,8 +1187,13 @@ class ChatView(QScrollArea):
         super().__init__(parent)
         self._theme = "light"
         self._bubbles: list[MessageBubble] = []
+        self._last_bubble_width: int | None = None
         self._follow_output = True
         self._programmatic_scroll = False
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._scroll_to_bottom_if_following)
+        self._scroll_timer.setInterval(0)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -927,13 +1208,25 @@ class ChatView(QScrollArea):
         self.messages.setSpacing(4)
         self.messages.addStretch()
         self.setWidget(self.container)
+        self.viewport().setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.container.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.container.installEventFilter(self)
         self.apply_theme("light")
 
     def clear(self) -> None:
+        self._scroll_timer.stop()
         for bubble in self._bubbles:
+            self.messages.removeWidget(bubble)
+            bubble.dispose()
             bubble.deleteLater()
         self._bubbles.clear()
+        self._last_bubble_width = None
         self._set_follow_output(True)
+
+    def dispose(self) -> None:
+        """Retire message renderers before the top-level window is destroyed."""
+
+        self.clear()
 
     def _add(self, bubble: MessageBubble) -> MessageBubble:
         self._bubbles.append(bubble)
@@ -995,6 +1288,8 @@ class ChatView(QScrollArea):
     def remove_bubble(self, bubble: MessageBubble) -> None:
         if bubble in self._bubbles:
             self._bubbles.remove(bubble)
+            self.messages.removeWidget(bubble)
+            bubble.dispose()
             bubble.deleteLater()
 
     def message_updated(self, bubble: MessageBubble) -> None:
@@ -1003,13 +1298,36 @@ class ChatView(QScrollArea):
 
     def _apply_size(self, bubble: MessageBubble) -> None:
         width = min(LANE_MAX_WIDTH, max(420, self.viewport().width() - 56))
-        bubble.setFixedWidth(width)
+        if width != self._last_bubble_width:
+            for current in self._bubbles:
+                current.setFixedWidth(width)
+            self._last_bubble_width = width
+        elif bubble.width() != width:
+            bubble.setFixedWidth(width)
 
     def set_bottom_inset(self, inset: int) -> None:
-        """Leave room for the overlaid composer without changing message widths."""
+        """Leave trailing space below the final message."""
 
         left, top, right, _bottom = self.messages.getContentsMargins()
-        self.messages.setContentsMargins(left, top, right, max(18, int(inset)))
+        bottom = max(18, int(inset))
+        if bottom == _bottom:
+            return
+        self.messages.setContentsMargins(left, top, right, bottom)
+        self.scroll_to_bottom()
+
+    def set_composer_clearance(self, clearance: int) -> None:
+        """Reserve a viewport lane for the bottom composer."""
+
+        bottom = max(0, int(clearance))
+        margins = self.viewportMargins()
+        if margins.bottom() == bottom:
+            return
+        self.setViewportMargins(
+            margins.left(),
+            margins.top(),
+            margins.right(),
+            bottom,
+        )
         self.scroll_to_bottom()
 
     def resizeEvent(self, event) -> None:
@@ -1037,6 +1355,8 @@ class ChatView(QScrollArea):
         if enabled == self._follow_output:
             return
         self._follow_output = enabled
+        if not enabled:
+            self._scroll_timer.stop()
         self.followChanged.emit(enabled)
 
     def pause_follow(self) -> None:
@@ -1058,14 +1378,17 @@ class ChatView(QScrollArea):
         maximum = bar.maximum()
         if maximum <= 0:
             return
-        # Once the user takes over the scroll position, only the explicit
-        # "回到最新消息" control (or a new outgoing message) resumes follow.
-        # This prevents an intermediate layout pass at the bottom from
-        # accidentally re-enabling follow while a response is still streaming.
         if maximum - value > 10:
             self._set_follow_output(False)
 
     def eventFilter(self, watched, event) -> bool:
+        container = getattr(self, "container", None)
+        if (
+            (watched is self.viewport() or watched is container)
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._clear_active_selection()
         if watched is self.viewport() and event.type() == QEvent.Type.Wheel:
             delta = event.angleDelta().y() or event.pixelDelta().y()
             if delta < 0:
@@ -1079,6 +1402,11 @@ class ChatView(QScrollArea):
                 self.pause_follow()
         return super().eventFilter(watched, event)
 
+    def _clear_active_selection(self) -> None:
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (MessageTextBrowser, _MathWebView)):
+            focused.clear_selection()
+
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y() or event.pixelDelta().y()
         if delta < 0:
@@ -1090,7 +1418,8 @@ class ChatView(QScrollArea):
             self._set_follow_output(True)
         if not self._follow_output:
             return
-        QTimer.singleShot(0, self._scroll_to_bottom_if_following)
+        if not self._scroll_timer.isActive():
+            self._scroll_timer.start()
 
     def _scroll_to_bottom_if_following(self) -> None:
         if not self._follow_output:

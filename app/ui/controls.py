@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import sys
+import time
 import weakref
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QTimer, Qt
-from PySide6.QtGui import QHelpEvent, QPainterPath, QRegion
+from PySide6.QtCore import (
+    QElapsedTimer,
+    QEvent,
+    QObject,
+    QPoint,
+    QRectF,
+    QTimer,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QHelpEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QRegion,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -12,8 +33,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListView,
     QMenu,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QToolButton,
@@ -47,6 +70,275 @@ def _apply_rounded_mask(widget: QWidget, radius: float = 12) -> None:
     path = QPainterPath()
     path.addRoundedRect(QRectF(widget.rect()), radius, radius)
     widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+
+def build_flat_menu(parent=None) -> QMenu:
+    """Menu that Qt paints itself with the app's flat, opaque surface.
+
+    macOS renders a plain QMenu as a native panel with a translucent vibrancy
+    material.  Asking for a translucent background makes Qt draw the menu
+    itself, so the style sheet's solid white (or dark) sheet is what the user
+    actually sees.  The menu deliberately has no QWidget parent: callers such
+    as QTextBrowser set a local ``background: transparent`` stylesheet, and
+    Qt propagates that stylesheet to child menus before the application-level
+    QMenu rule can paint the panel.
+
+    ``parent`` remains accepted for source compatibility, but is intentionally
+    not passed to QMenu.
+    """
+
+    menu = QMenu()
+    menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    menu.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+    return menu
+
+
+def show_edit_menu(
+    widget: QWidget,
+    position,
+    *,
+    undo_available: bool,
+    redo_available: bool,
+    has_selection: bool,
+    can_paste: bool,
+    handlers: dict,
+) -> None:
+    """Show the standard edit actions on the app's flat menu surface."""
+
+    menu = build_flat_menu(widget)
+    entries = (
+        ("undo", "撤销", undo_available),
+        ("redo", "重做", redo_available),
+        (None, None, None),
+        ("cut", "剪切", has_selection),
+        ("copy", "复制", has_selection),
+        ("paste", "粘贴", can_paste),
+        ("delete", "删除", has_selection),
+        (None, None, None),
+        ("select_all", "全选", True),
+    )
+    actions: dict[str, QAction] = {}
+    for key, label, enabled in entries:
+        if key is None:
+            menu.addSeparator()
+            continue
+        action = menu.addAction(str(label))
+        action.setEnabled(bool(enabled))
+        actions[key] = action
+    chosen = menu.exec(position)
+    menu.deleteLater()
+    if chosen is None:
+        return
+    for key, action in actions.items():
+        if chosen is action:
+            handler = handlers.get(key)
+            if handler is not None:
+                handler()
+            return
+
+
+class FlatLineEdit(QLineEdit):
+    """Single-line field whose right-click menu stays a flat panel."""
+
+    def contextMenuEvent(self, event) -> None:
+        show_edit_menu(
+            self,
+            event.globalPos(),
+            undo_available=self.isUndoAvailable(),
+            redo_available=self.isRedoAvailable(),
+            has_selection=self.hasSelectedText(),
+            can_paste=bool(QApplication.clipboard().text()),
+            handlers={
+                "undo": self.undo,
+                "redo": self.redo,
+                "cut": self.cut,
+                "copy": self.copy,
+                "paste": self.paste,
+                "delete": self.del_,
+                "select_all": self.selectAll,
+            },
+        )
+
+
+class FlatPlainTextEdit(QPlainTextEdit):
+    """Multi-line field whose right-click menu stays a flat panel."""
+
+    def contextMenuEvent(self, event) -> None:
+        cursor = self.textCursor()
+        handlers = {
+            "undo": self.undo,
+            "redo": self.redo,
+            "cut": self.cut,
+            "copy": self.copy,
+            "paste": self.paste,
+            "delete": lambda: self.textCursor().removeSelectedText(),
+            "select_all": self.selectAll,
+        }
+        show_edit_menu(
+            self,
+            event.globalPos(),
+            undo_available=self.document().isUndoAvailable(),
+            redo_available=self.document().isRedoAvailable(),
+            has_selection=cursor.hasSelection(),
+            can_paste=self.canPaste(),
+            handlers=handlers,
+        )
+
+
+class FrameAnimator(QObject):
+    """Ramp a float on a precise 16 ms timer with a cubic ease-out curve.
+
+    Layout transitions in this app animate geometry directly (splitter sizes,
+    widget offsets), so a plain value ramp with a fixed 60 fps tick is both
+    cheaper and more predictable than a property animation per frame.
+    """
+
+    valueChanged = Signal(float)
+    finished = Signal()
+
+    def __init__(self, duration_ms: int = 240, parent=None) -> None:
+        super().__init__(parent)
+        self._duration = max(1, int(duration_ms))
+        self._start = 0.0
+        self._end = 0.0
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(self._advance)
+
+    @property
+    def timer(self) -> QTimer:
+        return self._timer
+
+    def is_running(self) -> bool:
+        return self._timer.isActive()
+
+    def start(self, start: float, end: float) -> None:
+        self._start = float(start)
+        self._end = float(end)
+        self._clock.start()
+        self._timer.start()
+        self.valueChanged.emit(self._start)
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def _advance(self) -> None:
+        progress = min(1.0, self._clock.elapsed() / self._duration)
+        eased = 1.0 - (1.0 - progress) ** 3
+        value = self._start + (self._end - self._start) * eased
+        if progress >= 1.0:
+            self._timer.stop()
+            self.valueChanged.emit(self._end)
+            self.finished.emit()
+            return
+        self.valueChanged.emit(value)
+
+
+class SystemIdleClock:
+    """Best-effort "seconds since the user last touched this machine".
+
+    The desktop app schedules one expensive warm-up (building the WebEngine
+    surface) and wants to run it while the user is not interacting.  Activity
+    cannot be observed with a Python event filter on QApplication: PySide
+    crashes when Chromium delivers events for its own unregistered types, and
+    filters installed on individual widgets never see events sent straight to
+    a child.  The platform idle clock answers the question directly instead.
+    """
+
+    def __init__(self) -> None:
+        self._probe = None
+        if sys.platform != "darwin":
+            return
+        try:
+            library = ctypes.CDLL(ctypes.util.find_library("CoreGraphics"))
+            probe = library.CGEventSourceSecondsSinceLastEventType
+            probe.restype = ctypes.c_double
+            probe.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+        except (OSError, AttributeError, TypeError):
+            return
+        self._probe = probe
+
+    def seconds_since_input(self) -> float | None:
+        if self._probe is None:
+            return None
+        try:
+            value = float(self._probe(0, 0xFFFFFFFF))
+        except Exception:
+            return None
+        if value != value or value < 0:
+            return None
+        return value
+
+
+class IdleDispatcher(QObject):
+    """Run one heavy callback once the machine has been quiet for a moment.
+
+    Creating the embedded WebEngine surface blocks the GUI thread for a few
+    hundred milliseconds.  Waiting for an idle gap keeps that cost away from
+    the user's keystrokes and clicks; ``deadline_ms`` guarantees the work still
+    happens when the machine never goes quiet.
+    """
+
+    def __init__(
+        self,
+        *,
+        idle_ms: int = 700,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._idle_ms = max(0, int(idle_ms))
+        self._clock = SystemIdleClock()
+        self._callback = None
+        self._not_before = 0.0
+        self._deadline = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(120)
+        self._timer.timeout.connect(self._maybe_run)
+
+    def schedule(
+        self,
+        callback,
+        *,
+        delay_ms: int = 0,
+        deadline_ms: int = 6000,
+    ) -> None:
+        now = time.monotonic()
+        self._callback = callback
+        self._not_before = now + max(0, delay_ms) / 1000.0
+        self._deadline = now + max(0, deadline_ms) / 1000.0 if deadline_ms else 0.0
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def cancel(self) -> None:
+        self._callback = None
+        self._timer.stop()
+
+    def is_pending(self) -> bool:
+        return self._callback is not None
+
+    def seconds_since_input(self) -> float | None:
+        return self._clock.seconds_since_input()
+
+    def _maybe_run(self) -> None:
+        callback = self._callback
+        if callback is None:
+            self._timer.stop()
+            return
+        now = time.monotonic()
+        if now < self._not_before:
+            return
+        since_input = self.seconds_since_input()
+        quiet = (
+            since_input is None
+            or since_input >= self._idle_ms / 1000.0
+        )
+        if not quiet and not (self._deadline and now >= self._deadline):
+            return
+        self._callback = None
+        self._timer.stop()
+        callback()
 
 
 class RoundedComboBox(QComboBox):
@@ -125,7 +417,11 @@ QListView#roundedComboView QScrollBar::sub-line:vertical {{
 
 
 class RoundedMenu(QMenu):
-    """Context menu with the same floating surface as rounded combo popups."""
+    """Rounded menu surface kept for callers that still import it.
+
+    The application itself uses platform menus for text selection and
+    right-click actions, so macOS renders its own native menu.
+    """
 
     def __init__(self, theme: str = "light", parent=None) -> None:
         super().__init__(parent)
@@ -213,8 +509,11 @@ class ConfirmationDialog(QDialog):
         )
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._surface_radius = 16.0
+        self._surface_panel = "#FFFFFF"
+        self._surface_border = "#D4D6D9"
         self.setStyleSheet(
-            "QDialog#confirmationDialog { background: transparent; }"
+            "QDialog#confirmationDialog { background: transparent; border: none; }"
         )
         self.setFixedWidth(460)
         self.setMinimumHeight(290)
@@ -324,16 +623,34 @@ class ConfirmationDialog(QDialog):
             )
         self.move(x, y)
 
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = min(self._surface_radius, rect.width() / 2, rect.height() / 2)
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.fillPath(path, QColor(self._surface_panel))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(self._surface_border), 1.0))
+        painter.drawPath(path)
+
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         palette = colors(theme)
+        self._surface_panel = palette["panel"]
+        self._surface_border = palette["border_strong"]
+        self.setStyleSheet(
+            "QDialog#confirmationDialog { background: transparent; border: none; }"
+        )
         self.card.setStyleSheet(
-            rounded_surface_qss(
-                theme, "QFrame#confirmationCard", "0px"
-            )
-            + f"""
+            f"""
 QFrame#confirmationCard {{
-    border-radius: 16px;
+    color: {palette['fg']};
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 0px;
 }}
 QLabel#confirmationQuestionBadge {{
     background: {palette['accent_soft']};
@@ -392,6 +709,7 @@ QPushButton#confirmationYesBtn:pressed {{
         self.question_badge.setPixmap(
             icon("question", palette["accent"], 28).pixmap(28, 28)
         )
+        self.update()
 
 
 class NoticeDialog(QDialog):
@@ -523,7 +841,7 @@ class HoverTipManager(QObject):
         self._last_pos = QPoint()
         self._roots: list[weakref.ReferenceType[QWidget]] = []
         self._watch_timer = QTimer(self)
-        self._watch_timer.setInterval(750)
+        self._watch_timer.setInterval(2000)
         self._watch_timer.timeout.connect(self._refresh_watched_widgets)
 
     def watch(self, root: QWidget) -> None:
@@ -548,9 +866,6 @@ class HoverTipManager(QObject):
             self._watch_timer.stop()
 
     def _watch_tree(self, node: QObject) -> None:
-        # A Python application-wide event filter can crash when Chromium creates
-        # its native render delegate. Formula views mark their whole subtree so
-        # it is never traversed or filtered by the custom tooltip implementation.
         if isinstance(node, QWidget):
             if bool(node.property("skipCustomTooltipScan")):
                 return

@@ -12,15 +12,24 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import ASSETS_DIR
-from .controls import RoundedMenu
+from .controls import build_flat_menu
 from .icons import apply_icon, tint_pixmap
-from .theme import SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, colors
+from .theme import (
+    BRAND_BADGE_SIZE,
+    BRAND_MARK_SIZE,
+    BRAND_WORDMARK_SIZE,
+    RAIL_SIDEBAR_WIDTH,
+    SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+    colors,
+)
 
 
 def _format_time(value: str) -> str:
@@ -232,10 +241,11 @@ class ConversationItem(QWidget):
         self.checkbox.setChecked(checked)
 
     def _show_menu(self) -> None:
-        menu = RoundedMenu(self._theme, self)
+        menu = build_flat_menu(self)
         rename_action = menu.addAction("重命名")
         delete_action = menu.addAction("删除")
         chosen = menu.exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
+        menu.deleteLater()
         if chosen is rename_action:
             self.renameRequested.emit(self.conversation_id)
         elif chosen is delete_action:
@@ -276,6 +286,7 @@ class Sidebar(QWidget):
     deleteConversations = Signal(list)
     settingsRequested = Signal()
     collapseRequested = Signal()
+    expandRequested = Signal()
     modeChanged = Signal(str)
 
     def __init__(self, theme: str = "light", parent=None) -> None:
@@ -284,6 +295,7 @@ class Sidebar(QWidget):
         self.setMinimumWidth(SIDEBAR_MIN_WIDTH)
         self.setMaximumWidth(SIDEBAR_DEFAULT_WIDTH)
         self._theme = theme
+        self._collapsed = False
         self._batch_mode = False
         self._checked: dict[str, bool] = {}
         self._items: dict[str, ConversationItem] = {}
@@ -293,7 +305,18 @@ class Sidebar(QWidget):
         self.apply_theme(theme)
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+
+        self.pages = QStackedWidget(self)
+        self.pages.setObjectName("sidebarPages")
+        shell.addWidget(self.pages)
+
+        self.full_page = QWidget(self.pages)
+        self.full_page.setObjectName("sidebarFullPage")
+        self.full_page.setFixedWidth(SIDEBAR_DEFAULT_WIDTH)
+        root = QVBoxLayout(self.full_page)
         root.setContentsMargins(16, 17, 16, 16)
         root.setSpacing(8)
 
@@ -301,10 +324,10 @@ class Sidebar(QWidget):
         self.brand_header.setObjectName("chatBrandHeader")
         brand_row = QHBoxLayout(self.brand_header)
         brand_row.setContentsMargins(4, 0, 4, 0)
-        brand_row.setSpacing(9)
+        brand_row.setSpacing(8)
         self.brand_mark = QLabel(self.brand_header)
         self.brand_mark.setObjectName("chatBrandMark")
-        self.brand_mark.setFixedSize(34, 34)
+        self.brand_mark.setFixedSize(BRAND_MARK_SIZE, BRAND_MARK_SIZE)
         brand_row.addWidget(self.brand_mark, 0, Qt.AlignmentFlag.AlignTop)
         self.brand_wordmark = QLabel("deepseek", self.brand_header)
         self.brand_wordmark.setObjectName("chatBrandWordmark")
@@ -312,9 +335,6 @@ class Sidebar(QWidget):
         self.brand_badge = QLabel("CHAT", self.brand_header)
         self.brand_badge.setObjectName("brandBadge")
         brand_row.addWidget(self.brand_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        # Keep the previous label as a stable compatibility endpoint for
-        # integrations and tests.  The visible brand is the wordmark + badge
-        # above, matching the Harness web header.
         self.brand_label = QLabel("DeepSeek", self.brand_header)
         self.brand_label.setObjectName("chatBrand")
         self.brand_label.setAccessibleName("DeepSeek")
@@ -329,9 +349,6 @@ class Sidebar(QWidget):
         root.addWidget(self.brand_header)
         root.addSpacing(18)
 
-        # Keep a hidden compatibility endpoint for code that used the former
-        # sidebar-local selector.  The visible switcher lives only in the
-        # application-level Work Type bar.
         self.mode_selector = ProductModeSelector(self._theme, parent=self)
         self.mode_selector.hide()
         self.mode_selector.modeChanged.connect(self.modeChanged.emit)
@@ -401,6 +418,58 @@ class Sidebar(QWidget):
         self.settings_button.clicked.connect(self.settingsRequested.emit)
         self.settings_button.setIconSize(QSize(18, 18))
         root.addWidget(self.settings_button)
+
+        self.pages.addWidget(self.full_page)
+        self.rail_page = self._build_rail()
+        self.pages.addWidget(self.rail_page)
+        self.pages.setCurrentWidget(self.full_page)
+
+    def _build_rail(self) -> QWidget:
+        """Build the collapsed strip: two entries plus the settings gear."""
+
+        rail = QWidget(self.pages)
+        rail.setObjectName("sidebarRail")
+        rail.setFixedWidth(RAIL_SIDEBAR_WIDTH)
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(10, 14, 10, 14)
+        layout.setSpacing(6)
+
+        self.rail_expand_button = self._rail_button("sidebar", "展开侧边栏")
+        self.rail_expand_button.clicked.connect(self.expandRequested.emit)
+        layout.addWidget(self.rail_expand_button)
+
+        self.rail_new_button = self._rail_button("plus", "新建对话")
+        self.rail_new_button.clicked.connect(self.newChatRequested.emit)
+        layout.addWidget(self.rail_new_button)
+
+        layout.addStretch(1)
+
+        self.rail_settings_button = self._rail_button("settings", "设置")
+        self.rail_settings_button.clicked.connect(self.settingsRequested.emit)
+        layout.addWidget(self.rail_settings_button)
+        return rail
+
+    @staticmethod
+    def _rail_button(icon_name: str, tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("sidebarRailBtn")
+        button.setFixedSize(36, 36)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tooltip)
+        button.setProperty("iconName", icon_name)
+        return button
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Swap between the full navigation page and the icon rail."""
+
+        collapsed = bool(collapsed)
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self.pages.setCurrentWidget(self.rail_page if collapsed else self.full_page)
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
 
     def refresh(self, conversations: list[dict], current_id: str | None) -> None:
         self._current_id = current_id
@@ -508,24 +577,38 @@ class Sidebar(QWidget):
         self.mode_selector.apply_theme(theme)
         self.brand_mark.setPixmap(
             tint_pixmap(
-                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(34, 34),
+                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(
+                    BRAND_MARK_SIZE, BRAND_MARK_SIZE
+                ),
                 palette["fg"],
             )
         )
         self.brand_wordmark.setStyleSheet(
             f"color:{palette['fg']};background:transparent;"
-            "font-size:22px;font-weight:650;"
+            f"font-size:{BRAND_WORDMARK_SIZE}px;font-weight:650;"
         )
         self.brand_badge.setStyleSheet(
             "color:#FFFFFF;background:#171717;border-radius:4px;"
-            "padding:3px 6px 2px 6px;font-size:10px;font-weight:750;"
+            f"padding:3px 6px 2px 6px;font-size:{BRAND_BADGE_SIZE}px;font-weight:750;"
         )
         self.brand_label.setStyleSheet(
             f"color:{palette['fg']};background:transparent;font-size:18px;font-weight:650;"
         )
         apply_icon(self.new_button, "plus", palette["fg_sub"], 18)
         apply_icon(self.batch_button, "select", palette["fg_sub"], 17)
-        apply_icon(self.settings_button, "settings", palette["fg_sub"], 18)
+        apply_icon(self.settings_button, "settings", palette["entry_fg"], 18)
+        apply_icon(self.collapse_button, "sidebar", palette["entry_fg"], 19)
+        for button in (
+            self.rail_expand_button,
+            self.rail_new_button,
+            self.rail_settings_button,
+        ):
+            apply_icon(
+                button,
+                str(button.property("iconName")),
+                palette["entry_fg"],
+                19,
+            )
         for item in self._items.values():
             item.apply_theme(theme)
 

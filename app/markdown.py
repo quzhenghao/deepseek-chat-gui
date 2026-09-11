@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import html
 import re
+import sys
 
 from markdown_it import MarkdownIt
+
+if sys.platform == "darwin":
+    _CODE_FONT_STACK = "Menlo, Monaco"
+elif sys.platform == "win32":
+    _CODE_FONT_STACK = "Consolas, Courier New, monospace"
+else:
+    _CODE_FONT_STACK = "DejaVu Sans Mono, Liberation Mono, monospace"
 
 
 _MARKDOWN = MarkdownIt("commonmark", {"breaks": True, "html": False}).enable("table")
@@ -41,8 +49,6 @@ _LANGUAGE_LABELS = {
     "yml": "YAML",
 }
 
-# These environments are commonly emitted by chat models without an additional
-# \[...\] or $$...$$ wrapper. KaTeX treats them as display mathematics.
 _BARE_DISPLAY_ENVIRONMENTS = (
     "equation",
     "equation*",
@@ -145,9 +151,6 @@ def _normalize_math(expression: str, display: bool) -> str:
     if not display:
         return normalized
 
-    # KaTeX already receives displayMode=True. Document-level environments are
-    # converted to their embeddable equivalents while matrices/cases/aligned
-    # inside the expression remain completely intact.
     replacements = {
         "equation": None,
         "equation*": None,
@@ -174,8 +177,6 @@ def _normalize_math(expression: str, display: bool) -> str:
                 normalized = rf"\begin{{{replacement}}}{body}\end{{{replacement}}}"
             break
 
-    # Labels have no useful meaning in a chat message and KaTeX intentionally
-    # does not implement cross-document references.
     return re.sub(r"\\label\{[^{}]*\}", "", normalized)
 
 
@@ -372,7 +373,7 @@ def to_html(text: str, dark: bool = False) -> str:
         box-sizing:border-box; padding:4px 8px 4px 12px; border-bottom:1px solid {border};
         background:{code_background}; }}
       .markdown-body .code-language {{ flex:1; color:{secondary}; font-size:11px;
-        font-family:Menlo, Monaco, Consolas, monospace; text-transform:none; }}
+        font-family:{_CODE_FONT_STACK}; text-transform:none; }}
       .markdown-body .code-copy {{ flex:none; color:{secondary}; background:transparent;
         border:1px solid transparent; border-radius:6px; padding:3px 8px; font-size:11px;
         cursor:pointer; }}
@@ -380,10 +381,10 @@ def to_html(text: str, dark: bool = False) -> str:
       .markdown-body .code-copy.is-copied {{ color:{foreground}; background:{border}; }}
       .markdown-body pre {{ margin:0; padding:12px 14px; background:{code_background};
         white-space:pre; overflow-x:auto; overflow-y:hidden; }}
-      .markdown-body pre code {{ display:block; font-family:Menlo, Monaco, Consolas, monospace;
+      .markdown-body pre code {{ display:block; font-family:{_CODE_FONT_STACK};
         color:{foreground}; background:transparent; line-height:1.55; font-size:13px; }}
       .markdown-body :not(pre) > code:not(.math-source) {{
-        font-family:Menlo, Monaco, Consolas, monospace;
+        font-family:{_CODE_FONT_STACK};
         color:{foreground}; background:{code_background}; border:1px solid {border};
         border-radius:5px; padding:1px 5px; font-size:.92em; white-space:pre-wrap; }}
       .markdown-body table {{ border-collapse:collapse; margin:8px 0 12px 0;
@@ -418,7 +419,7 @@ def to_html(text: str, dark: bool = False) -> str:
       .markdown-body .math-source {{ color:{secondary}; background:transparent;
         white-space:pre-wrap; overflow-wrap:anywhere; padding:2px 4px; }}
       .markdown-body .katex-error {{ color:{error} !important;
-        font-family:Menlo, Monaco, Consolas, monospace; }}
+        font-family:{_CODE_FONT_STACK}; }}
     </style>
     <div class="markdown-body">{rendered or html.escape(text or '')}</div>
     """

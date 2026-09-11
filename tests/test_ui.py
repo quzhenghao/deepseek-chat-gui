@@ -1,20 +1,32 @@
 from __future__ import annotations
 
 import json
+import io
 import os
+import sys
+import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QHelpEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt
+from PySide6.QtGui import QHelpEvent, QPalette, QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QMenu,
+    QPushButton,
+    QTextBrowser,
+    QToolButton,
+    QWidget,
+)
 
-from app import ASSETS_DIR
+from app import ASSETS_DIR, diagnostics
 from app.config import (
     DEFAULTS,
     EFFORT_LABELS,
@@ -27,24 +39,52 @@ from app.config import (
     supports_thinking,
 )
 from app.api import payload_messages
+from app.markdown import _CODE_FONT_STACK, to_html
 from app.ui.controls import (
+    build_flat_menu,
     ConfirmationDialog,
+    FrameAnimator,
     HoverTipWidget,
+    IdleDispatcher,
     NoWheelDoubleSpinBox,
     NoWheelSpinBox,
     NoticeDialog,
     RoundedComboBox,
     RoundedMenu,
 )
+from app.ui.icons import icon
+from app.ui.harness_page import HarnessSurface
 from app.ui.main_window import ChatTextEdit, MainWindow
-from app.ui.message_bubbles import ChatView, ThinkingIndicator
+from app.ui.message_bubbles import (
+    WEB_SURFACE_MAX_HEIGHT,
+    WEB_SURFACE_TEXTURE_LIMIT,
+    ChatView,
+    MessageTextBrowser,
+    ThinkingIndicator,
+    _MathWebView,
+    _MATH_WEB_SHELL,
+)
 from app.ui.sidebar import ProductModeSelector
 from app.ui.theme import (
+    RAIL_SIDEBAR_WIDTH,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MIN_WIDTH,
     build_qss,
     colors,
 )
+
+
+class FakeMenuEvent:
+    """Minimal stand-in for the context-menu events the widgets receive."""
+
+    def __init__(self, pos: QPoint | None = None) -> None:
+        self._pos = QPoint(4, 4) if pos is None else pos
+
+    def pos(self) -> QPoint:
+        return self._pos
+
+    def globalPos(self) -> QPoint:
+        return QPoint(0, 0)
 
 
 class MemoryStore:
@@ -102,9 +142,6 @@ class UITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
-        # The suite repeatedly closes its last top-level widget. Keep the shared
-        # application alive so a later Qt WebEngine view is not initialized
-        # after QApplication has already entered its quit path.
         cls.app.setQuitOnLastWindowClosed(False)
 
     def wait_for(self, predicate, timeout_ms: int = 5000) -> bool:
@@ -261,8 +298,6 @@ class UITests(unittest.TestCase):
                 and web_view.height() > 22
             )
         )
-        # Font metrics settle asynchronously in Chromium; the production
-        # ResizeObserver/document.fonts hooks refresh overflow after this point.
         QTest.qWait(350)
         self.app.processEvents()
 
@@ -330,8 +365,6 @@ class UITests(unittest.TestCase):
         )
         self.assertLessEqual(wide["rootHeight"], web_view.height())
 
-        # Vertical wheel input inside Chromium must continue scrolling the outer
-        # chat instead of getting trapped in a fixed-height embedded page.
         view.resize(920, 180)
         self.assertTrue(self.wait_for(lambda: view.verticalScrollBar().maximum() > 0))
         view.verticalScrollBar().setValue(0)
@@ -430,7 +463,22 @@ class UITests(unittest.TestCase):
         )
         self.assertTrue(dialog.no_button.isDefault())
         self.assertFalse(dialog.question_badge.pixmap().isNull())
-        self.assertIn("border-radius: 16px", dialog.card.styleSheet())
+        dialog_surface = (
+            dialog.styleSheet()
+            .split("QDialog#confirmationDialog {", 1)[1]
+            .split("}", 1)[0]
+        )
+        self.assertIn("background: transparent;", dialog_surface)
+        self.assertIn("border: none;", dialog_surface)
+        self.assertEqual(dialog._surface_radius, 16.0)
+        card_surface = (
+            dialog.card.styleSheet()
+            .split("QFrame#confirmationCard {", 1)[1]
+            .split("}", 1)[0]
+        )
+        self.assertIn("background: transparent;", card_surface)
+        self.assertIn("border: none;", card_surface)
+        self.assertNotIn("background: #FFFFFF;", card_surface)
         self.assertIn("border-radius: 10px", dialog.card.styleSheet())
         self.assertIn("background: #FFF1F0", dialog.card.styleSheet())
         margins = dialog.layout().contentsMargins()
@@ -442,18 +490,34 @@ class UITests(unittest.TestCase):
         self.assertIsNone(dialog.card.graphicsEffect())
 
         dialog.apply_theme("dark")
-        self.assertIn("background: #3A2426", dialog.card.styleSheet())
+        self.assertEqual(dialog._surface_panel, colors("dark")["panel"])
+        self.assertEqual(dialog._surface_border, colors("dark")["border_strong"])
+        self.assertIn("background: transparent;", dialog.styleSheet())
+        self.assertIn("background: transparent;", dialog.card.styleSheet())
         dialog.close()
         dialog.deleteLater()
 
     def test_chat_composer_input_paints_the_card_surface(self) -> None:
         for theme in ("light", "dark"):
+            sheet = build_qss(theme)
             rule = (
-                build_qss(theme)
+                sheet
                 .split("QTextEdit#chatInput {", 1)[1]
                 .split("}", 1)[0]
             )
             self.assertIn(f"background: {colors(theme)['panel']};", rule)
+            area_rule = (
+                sheet.split("QWidget#composerArea {", 1)[1].split("}", 1)[0]
+            )
+            self.assertIn("background: transparent;", area_rule)
+            card_rule = (
+                sheet.split("QFrame#composerCard {", 1)[1].split("}", 1)[0]
+            )
+            self.assertIn(f"background: {colors(theme)['panel']};", card_rule)
+            hint_rule = (
+                sheet.split("QLabel#composerHint {", 1)[1].split("}", 1)[0]
+            )
+            self.assertIn("background: transparent;", hint_rule)
 
         host = QWidget()
         host.setStyleSheet(build_qss("light"))
@@ -467,6 +531,64 @@ class UITests(unittest.TestCase):
         self.assertEqual(sample.name(), colors("light")["panel"].lower())
         host.close()
         host.deleteLater()
+
+    def test_chat_composer_floats_below_the_message_viewport(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(920, 700)
+        window.show()
+        window.chat_workspace.set_page(window.chat_view)
+        self.app.processEvents()
+
+        message_rect = window.stack.geometry()
+        composer_rect = window.input_panel.geometry()
+        self.assertEqual(message_rect, window.chat_workspace.rect())
+        self.assertTrue(message_rect.intersects(composer_rect))
+        self.assertEqual(composer_rect.bottom() + 1, window.chat_workspace.height())
+        self.assertEqual(
+            window.chat_view.viewportMargins().bottom(), composer_rect.height()
+        )
+        viewport_bottom = window.chat_view.viewport().mapTo(
+            window.chat_workspace,
+            QPoint(0, window.chat_view.viewport().height()),
+        )
+        self.assertLessEqual(viewport_bottom.y(), composer_rect.top())
+        self.assertEqual(window.chat_view.messages.contentsMargins().bottom(), 18)
+
+        window.chat_input.setPlainText("第一行\n" * 12)
+        self.app.processEvents()
+        grown_composer_rect = window.input_panel.geometry()
+        grown_viewport_bottom = window.chat_view.viewport().mapTo(
+            window.chat_workspace,
+            QPoint(0, window.chat_view.viewport().height()),
+        )
+        self.assertEqual(window.stack.geometry(), window.chat_workspace.rect())
+        self.assertEqual(
+            window.chat_view.viewportMargins().bottom(), grown_composer_rect.height()
+        )
+        self.assertLessEqual(grown_viewport_bottom.y(), grown_composer_rect.top())
+
+        window.chat_input.clear()
+        window.show_welcome()
+        self.app.processEvents()
+        self.assertEqual(window.stack.geometry(), window.chat_workspace.rect())
+        self.assertEqual(window.chat_view.viewportMargins().bottom(), 0)
+        welcome_top = window.welcome_logo.mapTo(
+            window.chat_workspace, QPoint(0, 0)
+        ).y()
+        welcome_bottom = window.input_panel.hint_label.mapTo(
+            window.chat_workspace,
+            QPoint(0, window.input_panel.hint_label.height()),
+        ).y()
+        visual_center = (welcome_top + welcome_bottom) / 2
+        self.assertAlmostEqual(
+            visual_center,
+            window.chat_workspace.height() / 2,
+            delta=18,
+        )
+        window.close()
 
     def test_conversation_delete_uses_the_themed_confirmation(self) -> None:
         cfg = dict(DEFAULTS)
@@ -537,6 +659,19 @@ class UITests(unittest.TestCase):
             web_view.page(), "document.querySelectorAll('.katex').length"
         )
         self.assertEqual(count, 1)
+        composer_rect = window.input_panel.geometry()
+        viewport_bottom = window.chat_view.viewport().mapTo(
+            window.chat_workspace,
+            QPoint(0, window.chat_view.viewport().height()),
+        )
+        self.assertLessEqual(viewport_bottom.y(), composer_rect.top())
+        visible_formula_region = web_view.visibleRegion().boundingRect()
+        self.assertFalse(visible_formula_region.isEmpty())
+        visible_formula_bottom = web_view.mapTo(
+            window.chat_workspace,
+            QPoint(0, visible_formula_region.bottom() + 1),
+        )
+        self.assertLessEqual(visible_formula_bottom.y(), composer_rect.top())
         window.close()
 
     def test_formula_pages_survive_repeated_clear_and_rebuild(self) -> None:
@@ -673,8 +808,6 @@ class UITests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(window._mode, "chat")
             self.assertIs(window.page_stack.currentWidget(), window.chat_page)
-            # Switching products does not tear down the official runtime; the
-            # close event remains responsible for releasing it.
             stop.assert_not_called()
             window.close()
             stop.assert_called_once()
@@ -705,6 +838,360 @@ class UITests(unittest.TestCase):
             window.harness_page.surface.content_host,
         )
         window.close()
+
+    def test_harness_warm_start_defers_the_webengine_surface(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        page = window.harness_page
+        url = "http://127.0.0.1:8123/ui?token=abc"
+        shown: list[str] = []
+        with (
+            patch.object(page.runtime, "start") as runtime_start,
+            patch.object(page.surface, "show_web", lambda value: shown.append(value)),
+        ):
+            page.warm()
+            runtime_start.assert_called_once()
+            self.assertEqual(shown, [])
+
+            page.runtime._ready = True
+            page.runtime._url = url
+            page._on_ready(url)
+            self.assertEqual(shown, [])
+            self.assertTrue(page._idle.is_pending())
+
+            page.start()
+            self.assertEqual(shown, [url])
+            self.assertFalse(page._idle.is_pending())
+            runtime_start.assert_called_once()
+
+            page.start()
+            self.assertEqual(shown, [url, url])
+        window.close()
+
+    def test_harness_warm_start_is_armed_by_the_first_visible_event(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        with (
+            patch.object(window._app, "platformName", return_value="cocoa"),
+            patch.object(window.harness_page, "warm") as warm,
+        ):
+            window.show()
+            self.app.processEvents()
+            warm.assert_called_once_with()
+            self.assertFalse(window._warm_start_armed)
+            self.assertFalse(window._warm_start_pending)
+        window.close()
+
+    def test_macos_code_font_stack_does_not_request_consolas(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("macOS font resolution is not active on this platform")
+        self.assertNotIn("Consolas", _CODE_FONT_STACK)
+        self.assertIn("Menlo", to_html("```text\nprint(1)\n```"))
+
+    def test_harness_surface_loads_the_official_ui_once(self) -> None:
+        url = "http://127.0.0.1:8123/ui?token=abc"
+        loads: list[str] = []
+        with (
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
+            patch("app.ui.harness_page.harness_home", lambda: Path(tmp)),
+            patch.object(
+                HarnessSurface,
+                "_load_url",
+                lambda self, view, value: loads.append(value),
+            ),
+        ):
+            surface = HarnessSurface("light")
+            surface.show_web(url)
+            surface.show_web(url)
+            self.assertEqual(loads, [url])
+
+            surface._web_load_finished(True)
+            surface.show_web(url)
+            self.assertEqual(loads, [url])
+
+            the_next_runtime = "http://127.0.0.1:9999/ui?token=def"
+            surface.show_web(the_next_runtime)
+            self.assertEqual(loads, [url, the_next_runtime])
+
+            surface._web_load_finished(False)
+            surface.show_web(the_next_runtime)
+            self.assertEqual(loads, [url, the_next_runtime, the_next_runtime])
+            surface.dispose()
+
+    def test_crash_logging_records_fatal_and_python_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crash_log = root / "crash.log"
+            error_log = root / "errors.log"
+            original_hook = sys.excepthook
+            with (
+                patch.object(diagnostics, "LOG_DIR", root),
+                patch.object(diagnostics, "CRASH_LOG", crash_log),
+                patch.object(diagnostics, "ERROR_LOG", error_log),
+            ):
+                try:
+                    self.assertEqual(
+                        diagnostics.install(),
+                        (crash_log, error_log),
+                    )
+                    self.assertTrue(crash_log.exists())
+                    self.assertIn("session", crash_log.read_text(encoding="utf-8"))
+                    try:
+                        raise RuntimeError("diagnostics probe")
+                    except RuntimeError:
+                        with redirect_stderr(io.StringIO()):
+                            sys.excepthook(*sys.exc_info())
+                    recorded = error_log.read_text(encoding="utf-8")
+                    self.assertIn("diagnostics probe", recorded)
+                    self.assertIn("RuntimeError", recorded)
+                finally:
+                    sys.excepthook = original_hook
+
+    def test_inline_web_surface_never_exceeds_the_gpu_texture_limit(self) -> None:
+        view = _MathWebView()
+        view.resize(840, 22)
+        view._apply_content_height(60_000)
+        self.assertLessEqual(view.height(), WEB_SURFACE_MAX_HEIGHT)
+        self.assertLessEqual(view.height(), WEB_SURFACE_TEXTURE_LIMIT)
+        self.assertGreaterEqual(view.height(), 22)
+
+        view._apply_content_height(320)
+        self.assertEqual(view.height(), 321)
+
+        self.assertIn("internalScroll", _MATH_WEB_SHELL)
+        self.assertIn("if (!atEdge) return;", _MATH_WEB_SHELL)
+        self.assertIn("overflowY", _MATH_WEB_SHELL)
+        view.dispose()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_text_selection_uses_the_platform_palette(self) -> None:
+        for theme in ("light", "dark"):
+            sheet = build_qss(theme)
+            for selector in (
+                "QTextBrowser",
+                "QTextEdit#chatInput",
+                "QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit",
+            ):
+                rule = sheet.split(f"{selector} {{", 1)[1].split("}", 1)[0]
+                self.assertNotIn(
+                    "selection",
+                    rule,
+                    f"{selector} must keep the platform selection colors",
+                )
+
+        host = QWidget()
+        host.setStyleSheet(build_qss("light"))
+        host.resize(300, 120)
+        browser = QTextBrowser(host)
+        browser.setGeometry(0, 0, 300, 120)
+        browser.setPlainText("这是可以被选中的正文内容" * 4)
+        host.show()
+        self.app.processEvents()
+        cursor = browser.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        browser.setTextCursor(cursor)
+        self.app.processEvents()
+
+        image = browser.grab().toImage()
+        background = image.pixelColor(image.width() - 4, image.height() - 4)
+        counts: dict[str, int] = {}
+        for y in range(image.height()):
+            for x in range(image.width()):
+                color = image.pixelColor(x, y)
+                if color != background:
+                    counts[color.name()] = counts.get(color.name(), 0) + 1
+        self.assertTrue(counts)
+        painted = max(counts, key=lambda name: counts[name])
+        self.assertEqual(painted, QApplication.palette().highlight().color().name())
+        self.assertNotEqual(painted, colors("light")["accent"])
+        host.close()
+
+    def test_clicking_outside_message_clears_its_selection(self) -> None:
+        host = QWidget()
+        host.resize(420, 160)
+        browser = MessageTextBrowser(host)
+        browser.setGeometry(0, 0, 300, 100)
+        browser.setPlainText("这段回答可以被选中")
+        blank = QPushButton("空白区域", host)
+        blank.setGeometry(310, 100, 100, 40)
+        host.show()
+        self.app.processEvents()
+
+        cursor = browser.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        browser.setTextCursor(cursor)
+        browser.setFocus()
+        self.app.processEvents()
+        self.assertTrue(browser.textCursor().hasSelection())
+
+        QTest.mouseClick(blank, Qt.MouseButton.LeftButton)
+        self.app.processEvents()
+
+        self.assertFalse(browser.textCursor().hasSelection())
+        host.close()
+
+    def test_right_click_keeps_message_selection_and_copy_menu_enabled(self) -> None:
+        view = ChatView()
+        view.resize(520, 260)
+        bubble = view.add_assistant("这段回答可以被复制", thinking=False)
+        view.show()
+        self.app.processEvents()
+
+        browser = bubble.content_view._text_view
+        self.assertEqual(browser.cursor().shape(), Qt.CursorShape.IBeamCursor)
+        self.assertEqual(
+            browser.viewport().cursor().shape(), Qt.CursorShape.IBeamCursor
+        )
+        cursor = browser.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        browser.setTextCursor(cursor)
+        browser.setFocus()
+        self.app.processEvents()
+        self.assertTrue(browser.textCursor().hasSelection())
+
+        QTest.mouseClick(
+            browser.viewport(),
+            Qt.MouseButton.RightButton,
+            pos=browser.viewport().rect().center(),
+        )
+        self.app.processEvents()
+        self.assertTrue(browser.textCursor().hasSelection())
+
+        class CopyMenu(QMenu):
+            def exec(self, *args, **kwargs):
+                return next(
+                    action
+                    for action in self.actions()
+                    if action.text() == "复制"
+                )
+
+        clipboard = QApplication.clipboard()
+        previous = clipboard.text()
+        try:
+            with patch("app.ui.controls.QMenu", CopyMenu):
+                browser.contextMenuEvent(FakeMenuEvent())
+            self.assertEqual(clipboard.text().strip(), "这段回答可以被复制")
+            self.assertTrue(browser.textCursor().hasSelection())
+        finally:
+            clipboard.setText(previous)
+        view.close()
+
+    def test_math_surface_uses_text_cursor(self) -> None:
+        surface = _MathWebView()
+        self.assertEqual(surface.cursor().shape(), Qt.CursorShape.IBeamCursor)
+        surface.dispose()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_clicking_empty_message_lane_clears_its_selection(self) -> None:
+        view = ChatView()
+        view.resize(520, 260)
+        bubble = view.add_assistant("这段回答可以被选中", thinking=False)
+        view.show()
+        self.app.processEvents()
+
+        browser = bubble.content_view._text_view
+        cursor = browser.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        browser.setTextCursor(cursor)
+        browser.setFocus()
+        self.app.processEvents()
+        self.assertTrue(browser.textCursor().hasSelection())
+
+        QTest.mouseClick(
+            view.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(12, 12),
+        )
+        self.app.processEvents()
+
+        self.assertFalse(browser.textCursor().hasSelection())
+        view.close()
+
+    def test_context_menu_surface_is_flat_and_opaque(self) -> None:
+        for theme in ("light", "dark"):
+            sheet = build_qss(theme)
+            rule = sheet.split("QMenu {", 1)[1].split("}", 1)[0]
+            self.assertIn(f"background: {colors(theme)['panel']};", rule)
+            self.assertNotIn("transparent", rule)
+        self.assertEqual(colors("light")["panel"], "#FFFFFF")
+
+        host = QWidget()
+        host.setStyleSheet("background:transparent;border:none;")
+        menu = build_flat_menu(host)
+        self.assertIsNone(menu.parent())
+        self.assertEqual(
+            menu.palette().color(QPalette.ColorRole.Window).alpha(),
+            255,
+        )
+
+        self.assertTrue(
+            menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        )
+        menu.addAction("拷贝")
+        menu.addAction("全选")
+        menu.resize(160, 70)
+        menu.show()
+        self.app.processEvents()
+        image = menu.grab().toImage()
+        for point in ((8, 8), (image.width() - 8, image.height() - 8), (140, 62)):
+            color = image.pixelColor(*point)
+            self.assertEqual(color.alpha(), 255)
+            self.assertEqual(color.name().upper(), colors("light")["panel"])
+        menu.close()
+        menu.deleteLater()
+
+    def test_every_chat_surface_shows_the_flat_menu(self) -> None:
+        shown: list[QMenu] = []
+
+        class SpyMenu(QMenu):
+            def exec(self, *args, **kwargs):
+                shown.append(self)
+                return None
+
+        with patch("app.ui.controls.QMenu", SpyMenu):
+            editor = ChatTextEdit()
+            editor.setPlainText("草稿")
+            editor.contextMenuEvent(FakeMenuEvent())
+
+            view = ChatView()
+            bubble = view.add_assistant("正文内容", meta="DeepSeek")
+            bubble.content_view._text_view.contextMenuEvent(FakeMenuEvent())
+            bubble.content_view._ensure_web_view().contextMenuEvent(FakeMenuEvent())
+
+            cfg = dict(DEFAULTS)
+            cfg["models"] = list(DEFAULTS["models"])
+            store = MemoryStore()
+            conversation = store.create("会话")
+            window = MainWindow(cfg, store, self.app)
+            window.refresh_sidebar()
+            window.sidebar._items[conversation["id"]]._show_menu()
+            window.close()
+
+        self.assertEqual(len(shown), 4)
+        for menu in shown:
+            self.assertTrue(
+                menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground),
+                "menus must be drawn by Qt so they cannot fall back to the "
+                "translucent native panel",
+            )
+        labels = [
+            [action.text() for action in menu.actions()]
+            for menu in shown
+        ]
+        self.assertIn(
+            ["撤销", "重做", "", "剪切", "复制", "粘贴", "删除", "", "全选"],
+            labels,
+        )
+        self.assertEqual(labels[1], ["复制", "", "全选"])
+        self.assertEqual(labels[2], ["复制", "", "全选"])
+        self.assertEqual(labels[3], ["重命名", "删除"])
 
     def test_native_brands_use_monochrome_logo_and_neutral_sidebars(self) -> None:
         cfg = dict(DEFAULTS)
@@ -739,8 +1226,6 @@ class UITests(unittest.TestCase):
         self.assertEqual(window.splitter.sizes()[0], SIDEBAR_DEFAULT_WIDTH)
         self.assertEqual(window.sidebar.width(), SIDEBAR_DEFAULT_WIDTH)
 
-        # Dragging toward the right must stay at the maximum; dragging toward
-        # the left must stop at the usable minimum.
         window.splitter.setSizes([900, 379])
         self.app.processEvents()
         self.assertEqual(window.sidebar.width(), SIDEBAR_DEFAULT_WIDTH)
@@ -752,6 +1237,323 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(window.settings_page.sidebar.width(), SIDEBAR_DEFAULT_WIDTH)
         window.close()
+
+    def test_sidebar_collapses_into_an_icon_rail_with_animation(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        frames: list[float] = []
+        window._sidebar_animator.valueChanged.connect(frames.append)
+        window.set_sidebar_collapsed(True)
+        self.assertTrue(self.wait_for(lambda: not window._sidebar_animator.is_running()))
+
+        widths = [round(value) for value in frames]
+        self.assertGreaterEqual(len(widths), 10)
+        self.assertEqual(widths[0], SIDEBAR_DEFAULT_WIDTH)
+        self.assertEqual(widths[-1], RAIL_SIDEBAR_WIDTH)
+        self.assertEqual(
+            widths,
+            sorted(widths, reverse=True),
+            "the rail must shrink monotonically",
+        )
+        self.assertTrue(window.sidebar.is_collapsed())
+        self.assertEqual(window.sidebar.width(), RAIL_SIDEBAR_WIDTH)
+        self.assertIs(window.sidebar.pages.currentWidget(), window.sidebar.rail_page)
+
+        for button in (
+            window.sidebar.rail_expand_button,
+            window.sidebar.rail_new_button,
+            window.sidebar.rail_settings_button,
+        ):
+            self.assertTrue(button.isVisible())
+            self.assertFalse(button.icon().isNull())
+        self.assertFalse(window.sidebar.full_page.isVisible())
+        self.assertFalse(window.sidebar.settings_button.isVisible())
+
+        window.set_sidebar_collapsed(False)
+        self.assertTrue(self.wait_for(lambda: not window._sidebar_animator.is_running()))
+        self.assertFalse(window.sidebar.is_collapsed())
+        self.assertEqual(window.sidebar.width(), SIDEBAR_DEFAULT_WIDTH)
+        self.assertIs(window.sidebar.pages.currentWidget(), window.sidebar.full_page)
+        self.assertEqual(window.sidebar.minimumWidth(), SIDEBAR_MIN_WIDTH)
+        window.close()
+
+    def test_sidebar_transition_ticks_above_sixty_frames_per_second(self) -> None:
+        animator = FrameAnimator(230)
+        self.assertEqual(animator.timer.interval(), 16)
+        self.assertEqual(animator.timer.timerType(), Qt.TimerType.PreciseTimer)
+
+        stamps: list[float] = []
+        animator.valueChanged.connect(lambda _value: stamps.append(time.perf_counter()))
+        animator.start(SIDEBAR_DEFAULT_WIDTH, RAIL_SIDEBAR_WIDTH)
+        self.assertTrue(self.wait_for(lambda: not animator.is_running()))
+
+        intervals = [
+            later - earlier for earlier, later in zip(stamps, stamps[1:])
+        ]
+        self.assertGreaterEqual(len(intervals), 10)
+        self.assertLessEqual(max(intervals), 0.045)
+        self.assertLessEqual(sum(intervals) / len(intervals), 0.02)
+
+    def test_sidebar_rail_entries_are_wired_to_their_actions(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        window.set_sidebar_collapsed(True, animate=False)
+        self.app.processEvents()
+
+        window.sidebar.rail_settings_button.click()
+        self.assertIs(window.page_stack.currentWidget(), window.settings_page)
+        window.settings_page.back_button.click()
+        self.assertIs(window.page_stack.currentWidget(), window.chat_page)
+
+        window.sidebar.rail_expand_button.click()
+        self.assertTrue(self.wait_for(lambda: not window._sidebar_animator.is_running()))
+        self.assertFalse(window.sidebar.is_collapsed())
+        self.assertEqual(window.sidebar.width(), SIDEBAR_DEFAULT_WIDTH)
+
+        window.chat_input.setPlainText("待发送的草稿")
+        window.sidebar.rail_new_button.click()
+        self.app.processEvents()
+        self.assertEqual(window.chat_input.toPlainText(), "")
+        self.assertIs(window.stack.currentWidget(), window.welcome)
+        window.close()
+
+    def test_header_keeps_only_the_api_chip_at_the_trailing_edge(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        header = window.chat_page.findChild(QWidget, "chatHeader")
+        self.assertIsNotNone(header)
+        self.assertFalse(hasattr(window, "header_settings"))
+        self.assertFalse(hasattr(window, "sidebar_button"))
+        settings_buttons = [
+            button
+            for button in header.findChildren(QToolButton)
+            if button.toolTip() == "设置"
+        ]
+        self.assertEqual(settings_buttons, [])
+        toggles = [
+            button
+            for button in header.findChildren(QToolButton)
+            if "侧边栏" in button.toolTip()
+        ]
+        self.assertEqual(toggles, [])
+        entry_glyph = window.sidebar.collapse_button.icon().pixmap(20, 20)
+        rail_glyph = window.sidebar.rail_expand_button.icon().pixmap(20, 20)
+        self.assertFalse(entry_glyph.isNull())
+        self.assertFalse(rail_glyph.isNull())
+        self.assertEqual(entry_glyph.toImage(), rail_glyph.toImage())
+        layout = header.layout()
+        self.assertIs(layout.itemAt(layout.count() - 1).widget(), window.api_status)
+        self.assertEqual(window.api_status.text(), "API 已配置")
+        self.assertLessEqual(
+            header.width() - window.api_status.geometry().right() - 1,
+            24,
+        )
+        window.close()
+
+    def test_sidebar_brand_lockup_fits_without_clipping(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        header = window.sidebar.brand_header
+        row = header.layout()
+        margins = row.contentsMargins()
+        required = margins.left() + margins.right()
+        required += sum(
+            widget.sizeHint().width()
+            for widget in (
+                row.itemAt(index).widget() for index in range(row.count())
+            )
+            if widget is not None
+        )
+        required += row.spacing() * max(0, row.count() - 1)
+        self.assertLessEqual(
+            required,
+            header.width(),
+            f"brand row needs {required}px but only has {header.width()}px",
+        )
+
+        for label, wordmark in (
+            ("chat", window.sidebar.brand_wordmark),
+            ("settings", window.settings_page.brand_wordmark),
+        ):
+            self.assertGreaterEqual(
+                wordmark.width(),
+                wordmark.sizeHint().width(),
+                f"{label} wordmark is clipped",
+            )
+        window.close()
+
+    def test_idle_dispatcher_waits_for_quiet_and_never_filters_the_app(self) -> None:
+        dispatcher = IdleDispatcher(idle_ms=250)
+        calls: list[str] = []
+
+        with patch.object(dispatcher, "seconds_since_input", lambda: 0.05):
+            dispatcher.schedule(
+                lambda: calls.append("busy"),
+                delay_ms=0,
+                deadline_ms=600,
+            )
+            self.assertFalse(self.wait_for(lambda: bool(calls), timeout_ms=350))
+            self.assertEqual(calls, [])
+
+        with patch.object(dispatcher, "seconds_since_input", lambda: 5.0):
+            self.assertTrue(self.wait_for(lambda: bool(calls), timeout_ms=500))
+        self.assertEqual(calls, ["busy"])
+        self.assertFalse(dispatcher.is_pending())
+
+        calls.clear()
+        with patch.object(dispatcher, "seconds_since_input", lambda: 0.05):
+            dispatcher.schedule(
+                lambda: calls.append("deadline"),
+                delay_ms=0,
+                deadline_ms=120,
+            )
+            self.assertTrue(self.wait_for(lambda: bool(calls), timeout_ms=1200))
+        self.assertEqual(calls, ["deadline"])
+        dispatcher.cancel()
+
+        filtered: list[object] = []
+        original = QObject.installEventFilter
+
+        def spy(owner, watched):
+            if watched is self.app:
+                filtered.append(owner)
+            return original(owner, watched)
+
+        with patch.object(QObject, "installEventFilter", spy):
+            cfg = dict(DEFAULTS)
+            cfg["models"] = list(DEFAULTS["models"])
+            cfg["api_key"] = "test"
+            window = MainWindow(cfg, MemoryStore(), self.app)
+            window.show()
+            self.app.processEvents()
+        self.assertEqual(filtered, [])
+        window.close()
+
+    def test_follow_button_mirrors_the_composer_submit_button(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(1280, 820)
+        window.show()
+        window.chat_workspace.set_page(window.chat_view)
+        window.chat_view.add_user("帮我看一下并发问题")
+        window.chat_view.add_assistant("结论：需要给共享状态加锁。", meta="DeepSeek")
+        for index in range(6):
+            window.chat_view.add_user(f"继续追问 {index + 2}")
+            window.chat_view.add_assistant(
+                "先给出结论，再补充细节。" * 12,
+                meta="DeepSeek V4.1 Flash · High · 深度思考",
+            )
+        self.app.processEvents()
+        self.wait_for(
+            lambda: window.chat_view.verticalScrollBar().maximum() > 0
+        )
+
+        window.chat_view.pause_follow()
+        window.chat_view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        self.assertTrue(self.wait_for(lambda: window.chat_workspace.follow_button.isVisible()))
+
+        submit = window.input_panel.action_button
+        follow = window.chat_workspace.follow_button
+        submit_origin = submit.mapTo(window.chat_workspace, QPoint(0, 0))
+        self.assertEqual(follow.size(), submit.size())
+        self.assertEqual(follow.y(), submit_origin.y())
+        self.assertGreater(follow.x(), submit_origin.x() + submit.width())
+        self.assertLessEqual(follow.x() + follow.width(), window.chat_workspace.width())
+        window.close()
+
+    def test_settings_entries_share_one_flat_harness_surface(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+        window.open_settings()
+        self.app.processEvents()
+
+        entry = window.sidebar.settings_button
+        back = window.settings_page.back_button
+        self.assertEqual(entry.size(), back.size())
+        self.assertEqual(entry.iconSize(), back.iconSize())
+
+        for theme in ("light", "dark"):
+            window.apply_theme(theme)
+            self.app.processEvents()
+            palette = colors(theme)
+            rule = (
+                build_qss(theme)
+                .split("QPushButton#sidebarFooterBtn, QPushButton#settingsBackBtn {", 1)[1]
+                .split("}", 1)[0]
+            )
+            self.assertIn(f"color: {palette['entry_fg']};", rule)
+            self.assertIn("background: transparent;", rule)
+            hover_rule = (
+                build_qss(theme)
+                .split(
+                    "QPushButton#sidebarFooterBtn:hover, QPushButton#settingsBackBtn:hover {",
+                    1,
+                )[1]
+                .split("}", 1)[0]
+            )
+            self.assertIn(f"background: {palette['hover']};", hover_rule)
+            for button in (entry, back):
+                image = button.grab().toImage()
+                for point in ((image.width() - 6, 4), (image.width() // 2, 2)):
+                    self.assertEqual(image.pixelColor(*point).alpha(), 0)
+                ink = min(
+                    image.pixelColor(x, y).lightness()
+                    for x in range(0, image.width(), 2)
+                    for y in range(image.height())
+                    if image.pixelColor(x, y).alpha() > 200
+                )
+                if theme == "light":
+                    self.assertLessEqual(ink, 32)
+                else:
+                    self.assertGreaterEqual(ink, 200)
+        window.close()
+
+    def test_light_settings_entries_use_pure_black_ink(self) -> None:
+        self.assertEqual(colors("light")["entry_fg"], "#000000")
+
+        glyph = icon("settings", colors("light")["entry_fg"], 48)
+        image = glyph.pixmap(48, 48).toImage()
+        center = image.width() // 2
+        self.assertEqual(image.pixelColor(center, center).alpha(), 0)
+        self.assertGreater(image.pixelColor(center + 5, center).alpha(), 120)
+        for dx, dy in (
+            (17, 10),
+            (0, 20),
+            (-17, 10),
+            (17, -10),
+            (0, -20),
+            (-17, -10),
+        ):
+            self.assertGreater(
+                image.pixelColor(center + dx, center + dy).alpha(),
+                120,
+            )
+        self.assertEqual(image.pixelColor(center + 20, center).alpha(), 0)
 
     def test_personalization_setting_is_saved_from_embedded_page(self) -> None:
         cfg = dict(DEFAULTS)

@@ -31,7 +31,6 @@ class ConversationStore:
 
     def save(self) -> None:
         ensure_dir()
-        # 先写临时文件，避免异常退出损坏对话记录。
         temporary = DATA_PATH.with_suffix(".tmp")
         temporary.write_text(
             json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8"

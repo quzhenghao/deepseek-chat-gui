@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import cos, pi, sin
+from math import cos, pi, radians, sin, sqrt
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -12,6 +12,46 @@ def _path(points: list[tuple[float, float]], closed: bool = False) -> QPainterPa
         path.lineTo(QPointF(*point))
     if closed:
         path.closeSubpath()
+    return path
+
+
+def _cog_path(center: float = 12.0) -> QPainterPath:
+    """Six-lobed cog outline matching the Harness settings glyph.
+
+    The silhouette is the union of six overlapping rounded teeth, traced from
+    the first-party artwork.  Sampling the union keeps the scalloped joins of
+    the Harness glyph instead of the angular teeth of a classic spoked gear.
+    """
+
+    base_radius = 6.07
+    tooth_distance = 6.27
+    tooth_radius = 3.95
+    tooth_offset = radians(30)
+    step = 0.5
+    path = QPainterPath()
+    for index in range(int(round(360 / step)) + 1):
+        angle = radians(index * step)
+        direction = (cos(angle), sin(angle))
+        radius = base_radius
+        for tooth in range(6):
+            theta = tooth_offset + tooth * pi / 3
+            center_x = tooth_distance * cos(theta)
+            center_y = tooth_distance * sin(theta)
+            projection = direction[0] * center_x + direction[1] * center_y
+            discriminant = projection * projection - (
+                tooth_distance * tooth_distance - tooth_radius * tooth_radius
+            )
+            if discriminant > 0:
+                radius = max(radius, projection + sqrt(discriminant))
+        point = QPointF(
+            center + direction[0] * radius,
+            center + direction[1] * radius,
+        )
+        if index == 0:
+            path.moveTo(point)
+        else:
+            path.lineTo(point)
+    path.closeSubpath()
     return path
 
 
@@ -33,13 +73,17 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
         painter.drawRoundedRect(QRectF(3.5, 4, 17, 16), 2.5, 2.5)
         painter.drawLine(QPointF(8.5, 4.5), QPointF(8.5, 19.5))
     elif name == "settings":
-        painter.drawEllipse(QPointF(12, 12), 3.2, 3.2)
-        painter.drawEllipse(QPointF(12, 12), 7.4, 7.4)
-        for angle in range(0, 360, 45):
-            radians = angle * pi / 180
-            start = QPointF(12 + cos(radians) * 7.4, 12 + sin(radians) * 7.4)
-            end = QPointF(12 + cos(radians) * 9.3, 12 + sin(radians) * 9.3)
-            painter.drawLine(start, end)
+        painter.setPen(
+            QPen(
+                color,
+                2.15,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.drawPath(_cog_path())
+        painter.drawEllipse(QPointF(12, 12), 2.5, 2.5)
     elif name == "trash":
         painter.drawRoundedRect(QRectF(6.5, 8, 11, 12), 1.5, 1.5)
         painter.drawLine(QPointF(5, 6), QPointF(19, 6))

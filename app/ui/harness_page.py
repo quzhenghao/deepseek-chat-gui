@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QColor, QDesktopServices, QIcon
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from shiboken6 import delete as delete_qt_object, isValid
 
 from .. import ASSETS_DIR
 from ..harness import (
@@ -26,6 +25,7 @@ from ..harness import (
     harness_home,
 )
 from .icons import tint_pixmap
+from .controls import IdleDispatcher
 from .sidebar import ProductModeSelector
 from .theme import colors
 
@@ -45,9 +45,6 @@ class _HarnessWebPage(QWebEnginePage):
             if url.scheme().lower() in {"http", "https", "mailto"}:
                 QDesktopServices.openUrl(url)
             return False
-        # Do not let a redirect, iframe or script navigation escape the
-        # authenticated loopback origin.  User-initiated external links above
-        # are handed to the system browser explicitly.
         return False
 
 
@@ -63,10 +60,10 @@ class HarnessSurface(QWidget):
         self._theme = theme
         self._web_view: QWebEngineView | None = None
         self._profile: QWebEngineProfile | None = None
+        self._disposing = False
+        self._loaded_url = ""
+        self._awaiting_first_paint = False
         self._build_status_panel()
-        # Keep a hidden compatibility endpoint for older callers.  The
-        # visible Work Type bar is owned by MainWindow and is intentionally
-        # outside the official Harness Web UI.
         self.mode_selector = ProductModeSelector(theme, parent=self)
         self.mode_selector.set_mode("harness")
         self.mode_selector.hide()
@@ -146,63 +143,114 @@ class HarnessSurface(QWidget):
     def set_detail(self, text: str) -> None:
         self.status_detail.setText(text)
 
-    def show_web(self, url: str) -> QWebEngineView:
-        if self._web_view is None:
-            self._profile = QWebEngineProfile("deepseek-harness-desktop", self)
-            browser_dir = harness_home() / "browser"
-            browser_dir.mkdir(parents=True, exist_ok=True)
-            self._profile.setPersistentStoragePath(str(browser_dir))
-            self._profile.setCachePath(str(browser_dir / "cache"))
-            self._profile.setHttpAcceptLanguage("zh-CN,zh;q=0.9,en;q=0.7")
+    def show_web(self, url: str) -> QWebEngineView | None:
+        if self._disposing:
+            return None
+        view = self._ensure_web_view(url)
+        if self._loaded_url != url:
+            self._loaded_url = url
+            self._awaiting_first_paint = True
+            self._load_url(view, url)
+        if self._awaiting_first_paint:
+            self.status_panel.raise_()
+        else:
+            self._reveal_web()
+        self._resize_children()
+        return view
 
-            self._web_view = QWebEngineView(self.content_host)
-            self._web_view.setObjectName("harnessWebView")
-            self._web_view.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-            )
-            parsed = QUrl(url)
-            allowed_origin = f"{parsed.scheme()}://{parsed.authority()}"
-            page = _HarnessWebPage(self._profile, allowed_origin, self._web_view)
-            self._web_view.setPage(page)
-            settings = page.settings()
-            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            settings.setAttribute(
-                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
-                False,
-            )
-            self._web_view.loadFinished.connect(self._web_load_finished)
-        self._web_view.load(QUrl(url))
+    def _load_url(self, view: QWebEngineView, url: str) -> None:
+        view.load(QUrl(url))
+
+    def _ensure_web_view(self, url: str) -> QWebEngineView:
+        if self._web_view is not None:
+            return self._web_view
+        self._profile = QWebEngineProfile("deepseek-harness-desktop", self)
+        browser_dir = harness_home() / "browser"
+        browser_dir.mkdir(parents=True, exist_ok=True)
+        self._profile.setPersistentStoragePath(str(browser_dir))
+        self._profile.setCachePath(str(browser_dir / "cache"))
+        self._profile.setHttpAcceptLanguage("zh-CN,zh;q=0.9,en;q=0.7")
+
+        view = QWebEngineView(self.content_host)
+        view.setObjectName("harnessWebView")
+        view.setProperty("skipCustomTooltipScan", True)
+        view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        parsed = QUrl(url)
+        allowed_origin = f"{parsed.scheme()}://{parsed.authority()}"
+        page = _HarnessWebPage(self._profile, allowed_origin, view)
+        page.setBackgroundColor(QColor(colors(self._theme)["canvas"]))
+        view.setPage(page)
+        settings = page.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
+            False,
+        )
+        view.loadFinished.connect(self._web_load_finished)
+        self._web_view = view
+        return view
+
+    def _reveal_web(self) -> None:
+        if self._web_view is None:
+            return
         self.status_panel.hide()
         self._web_view.show()
         self._web_view.raise_()
-        self._resize_children()
-        return self._web_view
 
     def _web_load_finished(self, ok: bool) -> None:
-        if ok:
+        if self._disposing:
             return
-        self.show_status(
-            "官方 Harness 页面加载失败，请检查本机服务状态后重试。",
-            failed=True,
-        )
+        if not ok:
+            self._loaded_url = ""
+            self._awaiting_first_paint = False
+            self.show_status(
+                "官方 Harness 页面加载失败，请检查本机服务状态后重试。",
+                failed=True,
+            )
+            return
+        self._awaiting_first_paint = False
+        self._reveal_web()
 
     def dispose(self) -> None:
-        """Release the persistent WebEngine objects before application exit."""
+        """Retire WebEngine objects through Qt's event loop.
+
+        Calling ``shiboken.delete`` on a live QWebEngineView tears down the
+        Qt Quick scene graph synchronously while Chromium may still be
+        delivering a frame.  On macOS that can crash in
+        ``QQuickWindow::~QQuickWindow``.  Hide and discard the page first,
+        then let Qt destroy the view and profile in their normal ownership
+        order.
+        """
+
+        if self._disposing:
+            return
+        self._disposing = True
 
         view = self._web_view
         profile = self._profile
         self._web_view = None
         self._profile = None
+        self._loaded_url = ""
+        self._awaiting_first_paint = False
         if view is not None:
+            try:
+                view.loadFinished.disconnect(self._web_load_finished)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+            view.hide()
             page = view.page()
-            view.setPage(None)
-            if page is not None and isValid(page):
-                delete_qt_object(page)
-            if isValid(view):
-                delete_qt_object(view)
-        if profile is not None:
-            if isValid(profile):
-                delete_qt_object(profile)
+            if page is not None:
+                try:
+                    page.setLifecycleState(QWebEnginePage.LifecycleState.Discarded)
+                except (AttributeError, RuntimeError, TypeError):
+                    pass
+            if profile is not None:
+                view.destroyed.connect(profile.deleteLater)
+            view.deleteLater()
+        elif profile is not None:
+            profile.deleteLater()
 
     def _resize_children(self) -> None:
         width = self.width()
@@ -219,6 +267,10 @@ class HarnessSurface(QWidget):
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         palette = colors(theme)
+        if self._web_view is not None:
+            page = self._web_view.page()
+            if page is not None:
+                page.setBackgroundColor(QColor(palette["canvas"]))
         self.setStyleSheet(f"QWidget#harnessSurface{{background:{palette['canvas']};}}")
         self.content_host.setStyleSheet(
             f"QWidget#harnessContentHost{{background:{palette['canvas']};}}"
@@ -235,7 +287,6 @@ class HarnessSurface(QWidget):
         self.status_detail.setStyleSheet(
             f"color:{palette['fg_muted']};background:transparent;font-size:11px;"
         )
-        self.mode_selector.apply_theme(theme)
         self.status_icon.setPixmap(
             tint_pixmap(
                 QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(58, 58),
@@ -255,6 +306,8 @@ class HarnessPage(QWidget):
         self._cfg = dict(cfg)
         self._theme = theme
         self._started_once = False
+        self._defer_surface = False
+        self._idle = IdleDispatcher(idle_ms=600, parent=self)
         self.surface = HarnessSurface(theme, self)
         self.surface.modeRequested.connect(self.modeRequested.emit)
         self.surface.retryRequested.connect(self.start)
@@ -274,18 +327,24 @@ class HarnessPage(QWidget):
         previous = self._cfg
         self._cfg = dict(cfg)
         self.runtime.update_config(cfg)
-        # The subprocess receives credentials and the endpoint through its
-        # environment at launch time.  If either changes, retire the warm
-        # process so the next visit cannot silently keep using stale values.
         runtime_inputs = ("api_key", "base_url", "harness_projects")
         if self.runtime.is_running and any(
             previous.get(key) != self._cfg.get(key) for key in runtime_inputs
         ):
+            self._idle.cancel()
+            self._defer_surface = False
             self.runtime.stop()
             self.surface.show_status("Harness 配置已更新，下次进入时会重新启动。")
 
     def start(self, silent: bool = False) -> None:
+        """Start the runtime for a user-visible visit and reveal the surface."""
+
         self._started_once = True
+        self._defer_surface = False
+        self._idle.cancel()
+        if self.runtime.is_ready:
+            self.surface.show_web(self.runtime.url)
+            return
         if not silent:
             self.surface.show_status("正在准备官方 Harness（首次启动会下载运行包）…")
             self.surface.set_detail(
@@ -293,6 +352,18 @@ class HarnessPage(QWidget):
             )
         working_directory = self._working_directory()
         self.runtime.start(working_directory)
+
+    def warm(self) -> None:
+        """Start the runtime in the background and defer the heavy GUI work.
+
+        The subprocess is the long pole, so it starts right away; building the
+        WebEngine surface blocks the GUI thread, so that part waits for an idle
+        moment instead of stuttering whatever the user is doing.
+        """
+
+        self._started_once = True
+        self._defer_surface = True
+        self.runtime.start(self._working_directory())
 
     def _working_directory(self) -> Path:
         for value in self._cfg.get("harness_projects") or []:
@@ -305,9 +376,17 @@ class HarnessPage(QWidget):
         return Path.home()
 
     def _on_state(self, text: str) -> None:
+        if self._defer_surface and not self.isVisible():
+            return
         self.surface.show_status(text)
 
     def _on_ready(self, url: str) -> None:
+        if not self.isVisible():
+            self._idle.schedule(
+                lambda: self.surface.show_web(url),
+                delay_ms=150,
+            )
+            return
         self.surface.show_web(url)
 
     def _on_failed(self, message: str) -> None:
@@ -321,6 +400,8 @@ class HarnessPage(QWidget):
         self.surface.apply_theme(theme)
 
     def stop(self) -> None:
+        self._defer_surface = False
+        self._idle.cancel()
         self.runtime.stop()
         self.surface.dispose()
 

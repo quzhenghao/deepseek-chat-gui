@@ -19,25 +19,12 @@ MEDIA_DIR = APP_DIR / "media"
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 MODEL_CATALOG_VERSION = 3
-# The current first-party Harness adapter caps its default output at 256k
-# tokens. Keeping the native settings limit in sync avoids generating a
-# request the official integration would reject before it reaches the model.
 MAX_OUTPUT_TOKENS = 256_000
 
-# DeepSeek's current unified Flash route is returned by the official
-# ``/models`` endpoint as ``deepseek-flash``.  The service currently exposes
-# text and image input through this route and supports the four thinking
-# states below.  Keep this catalog deliberately small: a model ID that is no
-# longer returned by the official endpoint must not remain as a built-in
-# choice merely because an older local config mentioned it.
 V41_FLASH_MODEL = "deepseek-flash"
 DEFAULT_MODELS = [V41_FLASH_MODEL]
 MODEL_LABELS = {V41_FLASH_MODEL: "DeepSeek V4.1 Flash"}
 
-# IDs from the previous catalog. The desktop client owns this migration
-# globally so a retired Pro route cannot remain selectable through a stale
-# local config or a manually pasted model list. Unrelated custom-gateway IDs
-# are still retained when they do not match one of these retired aliases.
 REMOVED_OFFICIAL_MODELS = {
     "deepseek-v4-pro",
     "deepseek-v4-flash",
@@ -146,7 +133,6 @@ def normalize_official_models(models: Any) -> list[str]:
 def _normalize_model(model: Any) -> str:
     value = str(model or "").strip()
     lowered = value.lower().replace("_", "-")
-    # 兼容旧版本展示名、临时 0910 ID 和旧视觉别名。
     if lowered in LEGACY_MODEL_ALIASES:
         return LEGACY_MODEL_ALIASES[lowered]
     compacted = re.sub(r"\s+", "-", lowered)

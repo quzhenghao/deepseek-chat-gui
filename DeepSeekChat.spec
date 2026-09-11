@@ -1,10 +1,8 @@
-# -*- mode: python ; coding: utf-8 -*-
-
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(SPECPATH)))
-from app import __version__  # noqa: E402
+from app import __version__
 
 
 hiddenimports = [

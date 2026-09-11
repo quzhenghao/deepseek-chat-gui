@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -45,9 +44,21 @@ from ..harness import (
     find_npx,
     harness_home,
 )
-from .controls import NoWheelSpinBox, RoundedComboBox
+from .controls import (
+    FlatLineEdit,
+    FlatPlainTextEdit,
+    NoWheelSpinBox,
+    RoundedComboBox,
+)
 from .icons import apply_icon, tint_pixmap
-from .theme import SIDEBAR_DEFAULT_WIDTH, build_qss, colors
+from .theme import (
+    BRAND_BADGE_SIZE,
+    BRAND_MARK_SIZE,
+    BRAND_WORDMARK_SIZE,
+    SIDEBAR_DEFAULT_WIDTH,
+    build_qss,
+    colors,
+)
 
 NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 
@@ -89,9 +100,9 @@ class SettingsPage(QWidget):
 
         brand_row = QHBoxLayout()
         brand_row.setContentsMargins(4, 0, 4, 0)
-        brand_row.setSpacing(9)
+        brand_row.setSpacing(8)
         self.brand_mark = QLabel()
-        self.brand_mark.setFixedSize(34, 34)
+        self.brand_mark.setFixedSize(BRAND_MARK_SIZE, BRAND_MARK_SIZE)
         brand_row.addWidget(self.brand_mark)
         self.brand_wordmark = QLabel("deepseek")
         self.brand_wordmark.setObjectName("settingsBrandWordmark")
@@ -99,7 +110,6 @@ class SettingsPage(QWidget):
         self.brand_badge = QLabel("CHAT")
         self.brand_badge.setObjectName("brandBadge")
         brand_row.addWidget(self.brand_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        # Compatibility label retained for consumers that used ``page.brand``.
         self.brand = QLabel("DeepSeek")
         self.brand.setObjectName("settingsBrand")
         self.brand.setAccessibleName("DeepSeek")
@@ -221,7 +231,7 @@ class SettingsPage(QWidget):
         connection, connection_form = self._section(
             "API 连接", "密钥只保存在当前电脑，不会写入项目源码。"
         )
-        self.api_key = QLineEdit()
+        self.api_key = FlatLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("sk-…")
         self.show_key = QToolButton()
@@ -244,7 +254,7 @@ class SettingsPage(QWidget):
         key_row.addWidget(self.test_button)
         connection_form.addRow("API 密钥", key_row)
 
-        self.base_url = QLineEdit()
+        self.base_url = FlatLineEdit()
         self.base_url.setPlaceholderText(DEFAULT_BASE_URL)
         connection_form.addRow("API 地址", self.base_url)
         self.connection_status = QLabel("可先测试连接并同步账号可用模型")
@@ -287,7 +297,7 @@ class SettingsPage(QWidget):
         models, models_form = self._section(
             "模型列表", "每行一个 API 模型 ID；测试连接成功时会自动同步。"
         )
-        self.models_edit = QPlainTextEdit()
+        self.models_edit = FlatPlainTextEdit()
         self.models_edit.setPlaceholderText("deepseek-flash")
         self.models_edit.setFixedHeight(104)
         self.models_edit.textChanged.connect(self._models_changed)
@@ -316,7 +326,7 @@ class SettingsPage(QWidget):
         layout.addWidget(hint)
         layout.addSpacing(8)
 
-        self.system_prompt_edit = QPlainTextEdit()
+        self.system_prompt_edit = FlatPlainTextEdit()
         self.system_prompt_edit.setObjectName("systemPromptEdit")
         self.system_prompt_edit.setPlaceholderText(
             "例如：你是一位严谨、耐心的助手。请始终使用简体中文回答，并在不确定时明确说明。"
@@ -378,7 +388,7 @@ class SettingsPage(QWidget):
         self.harness_warm_start = QCheckBox("启动时预热 Harness（推荐）")
         harness_form.addRow("启动行为", self.harness_warm_start)
 
-        self.harness_projects_edit = QPlainTextEdit()
+        self.harness_projects_edit = FlatPlainTextEdit()
         self.harness_projects_edit.setPlaceholderText(
             "可选：每行一个项目目录；留空则使用当前工作目录"
         )
@@ -729,7 +739,7 @@ class SettingsPage(QWidget):
         apply_icon(self.basic_button, "settings", palette["fg_sub"], 18)
         apply_icon(self.personalization_button, "sparkle", palette["fg_sub"], 18)
         apply_icon(self.environment_button, "refresh", palette["fg_sub"], 18)
-        apply_icon(self.back_button, "arrow-left", palette["fg_sub"], 18)
+        apply_icon(self.back_button, "arrow-left", palette["entry_fg"], 18)
 
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
@@ -737,17 +747,19 @@ class SettingsPage(QWidget):
         palette = colors(theme)
         self.brand_mark.setPixmap(
             tint_pixmap(
-                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(34, 34),
+                QIcon(str(ASSETS_DIR / "deepseek-mark.svg")).pixmap(
+                    BRAND_MARK_SIZE, BRAND_MARK_SIZE
+                ),
                 palette["fg"],
             )
         )
         self.brand_wordmark.setStyleSheet(
             f"color:{palette['fg']};background:transparent;"
-            "font-size:22px;font-weight:650;"
+            f"font-size:{BRAND_WORDMARK_SIZE}px;font-weight:650;"
         )
         self.brand_badge.setStyleSheet(
             "color:#FFFFFF;background:#171717;border-radius:4px;"
-            "padding:3px 6px 2px 6px;font-size:10px;font-weight:750;"
+            f"padding:3px 6px 2px 6px;font-size:{BRAND_BADGE_SIZE}px;font-weight:750;"
         )
         self.default_model.set_theme(theme)
         self.default_effort.set_theme(theme)
@@ -762,6 +774,4 @@ class SettingsPage(QWidget):
             self._reply.abort()
 
 
-# Keep the former import name working for callers while the surface itself is no
-# longer a dialog.
 SettingsDialog = SettingsPage

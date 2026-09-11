@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
 
-from .controls import RoundedMenu
+from .controls import build_flat_menu
 from .icons import apply_icon
 from .theme import colors
 
@@ -78,10 +78,11 @@ class ThumbView(QLabel):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:
-        menu = RoundedMenu(self._theme, self)
+        menu = build_flat_menu(self)
         open_action = menu.addAction("打开原图")
         remove_action = menu.addAction("移除图片")
         chosen = menu.exec(event.globalPos())
+        menu.deleteLater()
         if chosen is open_action:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._path))
         elif chosen is remove_action:

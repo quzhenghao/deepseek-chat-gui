@@ -3,9 +3,6 @@ from __future__ import annotations
 from .. import ASSETS_DIR
 
 
-# The native surfaces intentionally share Harness' neutral visual language.
-# Keep the active product switcher deliberately monochrome so Chat and Harness
-# read as one product family instead of two unrelated accent systems.
 ACCENT = "#171717"
 
 _LIGHT = {
@@ -18,6 +15,7 @@ _LIGHT = {
     "fg": "#1B1B1C",
     "fg_sub": "#5D626A",
     "fg_muted": "#92979F",
+    "entry_fg": "#000000",
     "hover": "#ECEDEF",
     "selected": "#E3E5E8",
     "accent": ACCENT,
@@ -45,6 +43,7 @@ _DARK = {
     "fg": "#F2F2F2",
     "fg_sub": "#B7B7B7",
     "fg_muted": "#858585",
+    "entry_fg": "#FFFFFF",
     "hover": "#2A2A2A",
     "selected": "#363636",
     "accent": "#E8E8E8",
@@ -64,10 +63,15 @@ _DARK = {
 
 THEMES = {"light": _LIGHT, "dark": _DARK}
 
-# Shared sidebar geometry so the chat view and settings page always agree on
-# the default width and keep a usable minimum when the user drags the handle.
-SIDEBAR_DEFAULT_WIDTH = 300
-SIDEBAR_MIN_WIDTH = 240
+SIDEBAR_DEFAULT_WIDTH = 280
+SIDEBAR_MIN_WIDTH = 220
+RAIL_SIDEBAR_WIDTH = 56
+
+BRAND_MARK_SIZE = 30
+BRAND_WORDMARK_SIZE = 20
+BRAND_BADGE_SIZE = 10
+
+FONT_STACK = '".AppleSystemUIFont", "Helvetica Neue", "PingFang SC"'
 
 
 def colors(theme: str = "light") -> dict[str, str]:
@@ -83,7 +87,7 @@ def build_qss(theme: str = "light") -> str:
 QWidget {{
     color: {c['fg']};
     font-size: 14px;
-    font-family: "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif;
+    font-family: {FONT_STACK};
 }}
 QMainWindow, QDialog, QWidget#central, QWidget#chatPage, QWidget#welcomePage,
 QWidget#settingsPage, QWidget#settingsRight, QWidget#settingsContent {{
@@ -97,6 +101,10 @@ QWidget#sidebar, QWidget#settingsSidebar {{
     background: {c['side_bg']};
     border-right: 1px solid {c['border']};
 }}
+QWidget#sidebarPages, QWidget#sidebarFullPage, QWidget#sidebarRail {{
+    background: transparent;
+    border: none;
+}}
 QSplitter#mainSplitter {{
     background: {c['side_bg']};
     border: none;
@@ -106,7 +114,7 @@ QWidget#chatHeader, QWidget#settingsHeader {{
     border-bottom: 1px solid {c['border']};
 }}
 QWidget#composerArea {{
-    background: {c['canvas']};
+    background: transparent;
 }}
 QWidget#chatWorkspace {{
     background: {c['canvas']};
@@ -139,7 +147,7 @@ QLabel#settingsBrand {{
 QLabel#chatBrandWordmark, QLabel#settingsBrandWordmark {{
     color: {c['fg']};
     background: transparent;
-    font-size: 22px;
+    font-size: {BRAND_WORDMARK_SIZE}px;
     font-weight: 650;
 }}
 QLabel#brandBadge {{
@@ -147,7 +155,7 @@ QLabel#brandBadge {{
     background: #171717;
     border-radius: 4px;
     padding: 3px 6px 2px 6px;
-    font-size: 10px;
+    font-size: {BRAND_BADGE_SIZE}px;
     font-weight: 750;
     letter-spacing: 0.7px;
 }}
@@ -177,6 +185,11 @@ QLabel#subText, QLabel#hintLabel, QLabel#timeLabel, QLabel#metaLabel {{
 }}
 QLabel#tinyLabel {{
     color: {c['fg_muted']};
+    font-size: 11px;
+}}
+QLabel#composerHint {{
+    color: {c['fg_muted']};
+    background: transparent;
     font-size: 11px;
 }}
 QLabel#sectionLabel {{
@@ -282,32 +295,39 @@ QPushButton#settingsNavBtn:checked {{
     background: {c['accent_soft']};
     border-color: {c['selected']};
 }}
-QPushButton#settingsBackBtn {{
-    color: {c['fg_sub']};
-    background: {c['panel']};
-    border: 1px solid {c['border']};
-    border-radius: 10px;
-    text-align: left;
-    padding: 9px 12px;
-}}
-QPushButton#settingsBackBtn:hover {{
-    color: {c['fg']};
-    background: {c['hover']};
-    border-color: {c['border_strong']};
-}}
-QPushButton#sidebarFooterBtn {{
-    color: {c['fg_sub']};
+/* The chat sidebar entry and the settings page exit share one flat surface:
+   they blend into the rail and only darken under the pointer. */
+QPushButton#sidebarFooterBtn, QPushButton#settingsBackBtn {{
+    color: {c['entry_fg']};
     background: transparent;
     border: 1px solid transparent;
     border-radius: 10px;
     text-align: left;
-    min-height: 40px;
-    padding: 8px 10px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 8px 12px;
     font-size: 14px;
 }}
-QPushButton#sidebarFooterBtn:hover {{
-    color: {c['fg']};
+QPushButton#sidebarFooterBtn:hover, QPushButton#settingsBackBtn:hover {{
+    color: {c['entry_fg']};
     background: {c['hover']};
+}}
+QPushButton#sidebarFooterBtn:pressed, QPushButton#settingsBackBtn:pressed {{
+    background: {c['selected']};
+}}
+QToolButton#sidebarRailBtn {{
+    color: {c['entry_fg']};
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 0;
+}}
+QToolButton#sidebarRailBtn:hover {{
+    color: {c['entry_fg']};
+    background: {c['hover']};
+}}
+QToolButton#sidebarRailBtn:pressed {{
+    background: {c['selected']};
 }}
 QToolButton {{
     color: {c['fg_sub']};
@@ -343,11 +363,7 @@ QToolButton#followLatestBtn {{
     color: {c['fg']};
     background: {c['panel']};
     border: 1px solid {c['border_strong']};
-    border-radius: 20px;
-    min-width: 40px;
-    max-width: 40px;
-    min-height: 40px;
-    max-height: 40px;
+    border-radius: 18px;
     padding: 0;
 }}
 QToolButton#followLatestBtn:hover {{
@@ -376,8 +392,6 @@ QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
     border: 1px solid {c['border_strong']};
     border-radius: 9px;
     padding: 7px 10px;
-    selection-background-color: {c['accent']};
-    selection-color: #FFFFFF;
 }}
 QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover,
 QPlainTextEdit:hover {{ border-color: {c['fg_muted']}; }}
@@ -469,12 +483,10 @@ QTextEdit#chatInput {{
     border: none;
     padding: 2px 2px;
     font-size: 14px;
-    selection-background-color: {c['accent']};
 }}
 QTextBrowser {{
     background: transparent;
     border: none;
-    selection-background-color: {c['accent']};
 }}
 QCheckBox {{ spacing: 7px; color: {c['fg_sub']}; }}
 QCheckBox::indicator {{
@@ -500,22 +512,24 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 9px; }}
 QScrollBar::handle:horizontal {{ background: {c['border_strong']}; border-radius: 4px; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+/* Menus keep the platform's standard entries but are painted as a plain,
+   opaque surface: macOS would otherwise show a translucent vibrancy panel. */
 QMenu {{
     color: {c['fg']};
     background: {c['panel']};
     border: 1px solid {c['border_strong']};
-    border-radius: 12px;
-    padding: 6px;
+    border-radius: 6px;
+    padding: 4px;
 }}
 QMenu::item {{
-    min-height: 22px;
-    padding: 7px 10px;
-    border-radius: 8px;
-    font-weight: 400;
+    min-height: 20px;
+    padding: 6px 22px 6px 12px;
+    border-radius: 4px;
+    background: transparent;
 }}
-QMenu::item:selected {{ color: {c['accent']}; background: {c['accent_soft']}; }}
+QMenu::item:selected {{ color: {c['fg']}; background: {c['hover']}; }}
 QMenu::item:disabled {{ color: {c['fg_muted']}; }}
-QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 7px; }}
+QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 8px; }}
 QToolTip {{
     color: {c['fg']};
     background: {c['panel']};

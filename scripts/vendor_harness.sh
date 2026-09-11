@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build-time only helper.  The resulting payload is copied into the macOS app
-# by DeepSeekChat.spec; end users do not need Node.js, npm, or npx installed.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HARNESS_PACKAGE="${HARNESS_PACKAGE:-@deepseek-ai/dsh@0.1.5-rc.1}"
 NODE_VERSION="${DEEPSEEK_NODE_VERSION:-v22.19.0}"
@@ -61,8 +59,6 @@ echo ">> Installing ${HARNESS_PACKAGE} into the local app payload"
   "$HARNESS_PACKAGE"
 
 if [ ! -f "$CLI" ]; then
-  # CLI is still inside the staging tree at this point; use the staging path
-  # for the validation before the final move.
   STAGED_CLI="$STAGE_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js"
   if [ ! -f "$STAGED_CLI" ]; then
     echo "Harness package installed but its CLI entry was not found." >&2
@@ -71,9 +67,6 @@ if [ ! -f "$CLI" ]; then
 fi
 
 mkdir -p "$ROOT_DIR/vendor"
-# npm's download cache is useful while assembling the payload but must not be
-# shipped inside the final application (the first-party modules are enough at
-# runtime and the cache would add hundreds of megabytes).
 rm -rf "$STAGE_DIR/npm-cache"
 mv "$STAGE_DIR" "$BUNDLE_DIR"
 trap - EXIT

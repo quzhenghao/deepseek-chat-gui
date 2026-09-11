@@ -15,6 +15,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
@@ -24,15 +25,16 @@ from . import HARNESS_BUNDLE_DIR
 from .config import APP_DIR, DEFAULT_BASE_URL
 
 
-# The version was inspected from the official repository and npm package on
-# 2026-09-10.  Pinning the developer-preview version avoids silently pulling a
-# breaking runtime into an existing desktop release; a future desktop release
-# can update this constant after re-running the same upstream audit.
 HARNESS_PACKAGE = "@deepseek-ai/dsh@0.1.5-rc.1"
 HARNESS_DISPLAY_VERSION = "0.1.5-rc.1"
 HARNESS_REPOSITORY_URL = "https://github.com/deepseek-ai/deepseek-harness"
 HARNESS_DOCS_URL = "https://deepseek-harness.github.io/deepseek-harness/"
 HARNESS_START_TIMEOUT_MS = 180_000
+HARNESS_LOG_LIMIT = 64 * 1024
+_HARNESS_URL_RE = re.compile(
+    r"dsh web:\s+(https?://127\.0\.0\.1:\d+[^\s]*)",
+    flags=re.IGNORECASE,
+)
 
 
 def find_npx() -> str | None:
@@ -99,6 +101,31 @@ def find_free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def _configure_process_isolation(process: QProcess) -> bool:
+    """Detach the Harness child from the launching terminal on Unix.
+
+    QProcess does not open a terminal itself, but npm can inherit the parent's
+    session and later spawn a child that behaves like a foreground command.
+    A new session makes the whole npx/node tree a quiet, owned process group
+    that can be stopped together when the desktop app exits.
+    """
+
+    parameters_type = getattr(QProcess, "UnixProcessParameters", None)
+    flags_type = getattr(QProcess, "UnixProcessFlag", None)
+    if parameters_type is None or flags_type is None:
+        return False
+    try:
+        parameters = parameters_type()
+        parameters.flags = (
+            flags_type.CreateNewSession
+            | flags_type.DisconnectControllingTerminal
+        )
+        process.setUnixProcessParameters(parameters)
+    except (AttributeError, RuntimeError, TypeError):
+        return False
+    return True
+
+
 def harness_home() -> Path:
     return APP_DIR / "harness"
 
@@ -160,7 +187,10 @@ class HarnessRuntime(QObject):
         self._server_reachable = False
         self._port = 0
         self._url = ""
-        self._log: list[str] = []
+        self._log = ""
+        self._generation = 0
+        self._process_group_id: int | None = None
+        self._uses_process_group = False
 
     @property
     def url(self) -> str:
@@ -171,8 +201,14 @@ class HarnessRuntime(QObject):
         return bool(self._process and self._process.state() != QProcess.ProcessState.NotRunning)
 
     @property
+    def is_ready(self) -> bool:
+        """True while the loopback UI is reachable and authenticated."""
+
+        return bool(self._ready and self._url)
+
+    @property
     def log(self) -> str:
-        return "".join(self._log)[-6000:]
+        return self._log[-6000:]
 
     def update_config(self, cfg: dict) -> None:
         self._cfg = dict(cfg)
@@ -212,7 +248,10 @@ class HarnessRuntime(QObject):
         self._ready = False
         self._server_reachable = False
         self._stopping = False
-        self._log.clear()
+        self._log = ""
+        self._generation += 1
+        generation = self._generation
+        self._process_group_id = None
 
         process = QProcess(self)
         process.setProgram(program)
@@ -227,21 +266,29 @@ class HarnessRuntime(QObject):
         )
         environment = QProcessEnvironment.systemEnvironment()
         path_value = environment.value("PATH", "")
-        npx_dir = str(Path(npx).resolve().parent)
-        if npx_dir not in path_value.split(os.pathsep):
-            path_value = npx_dir + os.pathsep + path_value
-        environment.insert("PATH", path_value)
+        path_entries = [
+            str(Path(program).resolve().parent),
+            str(Path(node).resolve().parent) if node else "",
+            str(Path(npx).resolve().parent) if npx else "",
+        ]
+        path_entries.extend(path_value.split(os.pathsep))
+        environment.insert(
+            "PATH",
+            os.pathsep.join(dict.fromkeys(entry for entry in path_entries if entry)),
+        )
         environment.insert("DSH_HOME", str(home))
         environment.insert("npm_config_cache", str(home / "npm-cache"))
         environment.insert("npm_config_prefer_offline", "true")
+        environment.insert("npm_config_update_notifier", "false")
+        environment.insert("npm_config_fund", "false")
+        environment.insert("npm_config_audit", "false")
+        environment.insert("NO_COLOR", "1")
         environment.insert("LANG", "zh_CN.UTF-8")
         environment.insert("LC_ALL", "zh_CN.UTF-8")
         api_key = str(self._cfg.get("api_key") or "").strip()
         if api_key:
             environment.insert("DEEPSEEK_API_KEY", api_key)
         else:
-            # Do not let an unrelated shell credential silently select a
-            # different account than the one configured in Chat.
             environment.remove("DEEPSEEK_API_KEY")
         base_url = str(self._cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
         environment.insert("DEEPSEEK_BASE_URL", base_url)
@@ -249,41 +296,106 @@ class HarnessRuntime(QObject):
         directory = working_directory if working_directory and working_directory.is_dir() else Path.home()
         process.setWorkingDirectory(str(directory))
         process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self._uses_process_group = _configure_process_isolation(process)
         process.readyReadStandardOutput.connect(self._read_output)
         process.readyReadStandardError.connect(self._read_output)
         process.errorOccurred.connect(self._process_error)
         process.finished.connect(self._process_finished)
+        process.started.connect(
+            lambda current=process: self._remember_process_group(current)
+        )
+        previous = self._process
+        if previous is not None and previous is not process:
+            previous.blockSignals(True)
+            previous.deleteLater()
         self._process = process
         self.stateChanged.emit("正在启动官方 Harness…")
         process.start()
+        self._remember_process_group(process)
         self._deadline_timer.start(HARNESS_START_TIMEOUT_MS)
-        QTimer.singleShot(250, self._probe)
+        QTimer.singleShot(250, lambda current=generation: self._probe(current))
 
     def stop(self) -> None:
         process = self._process
         self._stopping = True
+        self._ready = False
+        self._server_reachable = False
+        self._generation += 1
         self._probe_timer.stop()
         self._deadline_timer.stop()
-        if self._probe_socket is not None:
-            self._probe_socket.abort()
-            self._probe_socket.deleteLater()
-            self._probe_socket = None
+        self._retire_probe(self._probe_socket)
         if process is None:
+            self._terminate_process_group(signal.SIGTERM)
             self._kill_port_owner()
+            self._process_group_id = None
             self.stopped.emit()
             return
         if process.state() == QProcess.ProcessState.NotRunning:
             self._process = None
+            process.blockSignals(True)
             process.deleteLater()
+            self._terminate_process_group(signal.SIGTERM)
             self._kill_port_owner()
+            self._process_group_id = None
             self.stopped.emit()
             return
         self.stateChanged.emit("正在关闭 Harness…")
+        self._terminate_process_group(signal.SIGTERM)
         process.terminate()
         if not process.waitForFinished(5000):
+            self._terminate_process_group(signal.SIGKILL)
             process.kill()
             process.waitForFinished(1500)
         self._kill_port_owner()
+        self._process_group_id = None
+
+    def _remember_process_group(self, process: QProcess) -> None:
+        if process is not self._process or not self._uses_process_group:
+            return
+        try:
+            pid = int(process.processId())
+        except (TypeError, ValueError):
+            return
+        if pid > 1:
+            self._process_group_id = pid
+
+    def _terminate_process_group(self, signum: int) -> None:
+        group_id = self._process_group_id
+        if not group_id or not hasattr(os, "killpg"):
+            return
+        current_group = os.getpgrp() if hasattr(os, "getpgrp") else None
+        if group_id in {os.getpid(), current_group}:
+            return
+        try:
+            os.killpg(group_id, signum)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    def _is_expected_port_owner(self, pid: int) -> bool:
+        if pid in {os.getpid(), self._process_group_id}:
+            return False
+        if self._process_group_id and hasattr(os, "getpgid"):
+            try:
+                if os.getpgid(pid) == self._process_group_id:
+                    return True
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        command = result.stdout.strip().lower()
+        return (
+            str(self._port) in command
+            and "dsh" in command
+            and "web" in command
+        )
 
     def _kill_port_owner(self) -> None:
         """Clean up an npx child that detached after its wrapper exited."""
@@ -292,7 +404,12 @@ class HarnessRuntime(QObject):
             return
         try:
             result = subprocess.run(
-                ["lsof", "-ti", f"tcp:{self._port}"],
+                [
+                    "lsof",
+                    "-nP",
+                    "-tiTCP:" + str(self._port),
+                    "-sTCP:LISTEN",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -300,20 +417,38 @@ class HarnessRuntime(QObject):
             )
         except (OSError, subprocess.SubprocessError):
             return
+        terminated: list[int] = []
         for value in result.stdout.splitlines():
             try:
                 pid = int(value.strip())
             except ValueError:
                 continue
-            if pid == os.getpid():
+            if not self._is_expected_port_owner(pid):
                 continue
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 continue
+            terminated.append(pid)
+
+        if not terminated:
+            return
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline and terminated:
+            alive: list[int] = []
+            for pid in terminated:
+                try:
+                    os.kill(pid, 0)
+                except (ProcessLookupError, PermissionError):
+                    continue
+                alive.append(pid)
+            terminated = alive
+            if terminated:
+                time.sleep(0.02)
+        for pid in terminated:
             try:
                 os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
 
     def _read_output(self) -> None:
@@ -326,46 +461,51 @@ class HarnessRuntime(QObject):
         ):
             if data:
                 text = data.decode("utf-8", errors="replace")
-                self._log.append(text)
-                # The official Web runner protects the loopback UI with a
-                # one-time query token.  Keep the printed URL (rather than
-                # probing the bare port) so the embedded browser is
-                # authenticated on its first navigation.
-                match = re.search(
-                    r"dsh web:\s+(https?://127\.0\.0\.1:\d+[^\s]*)",
-                    self.log,
-                )
+                self._log = (self._log + text)[-HARNESS_LOG_LIMIT:]
+                match = _HARNESS_URL_RE.search(self._log)
                 if match:
                     self._url = match.group(1).rstrip(".,")
         self._maybe_ready()
 
-    def _probe(self) -> None:
+    def _probe(self, generation: int | None = None) -> None:
+        if generation is not None and generation != self._generation:
+            return
         if self._stopping or self._ready or not self.is_running:
             return
         socket_probe = QTcpSocket(self)
         self._probe_socket = socket_probe
-        socket_probe.connected.connect(self._server_connected)
-        socket_probe.errorOccurred.connect(self._probe_failed)
+        socket_probe.connected.connect(
+            lambda probe=socket_probe: self._server_connected(probe)
+        )
+        socket_probe.errorOccurred.connect(
+            lambda _error, probe=socket_probe: self._probe_failed(probe)
+        )
         socket_probe.connectToHost("127.0.0.1", self._port)
 
-    def _probe_failed(self, _error) -> None:
-        socket_probe = self._probe_socket
-        if socket_probe is not None:
-            socket_probe.abort()
-            socket_probe.deleteLater()
-        self._probe_socket = None
+    def _retire_probe(self, socket_probe: QTcpSocket | None) -> None:
+        """Detach one probe socket without letting a stale signal touch a new one."""
+
+        if socket_probe is None:
+            return
+        if self._probe_socket is socket_probe:
+            self._probe_socket = None
+        socket_probe.blockSignals(True)
+        socket_probe.abort()
+        socket_probe.deleteLater()
+
+    def _probe_failed(self, socket_probe: QTcpSocket | None = None) -> None:
+        if socket_probe is not None and socket_probe is not self._probe_socket:
+            return
+        self._retire_probe(socket_probe if socket_probe is not None else self._probe_socket)
         if not self._stopping and not self._ready:
             self._probe_timer.start(450)
 
-    def _server_connected(self) -> None:
+    def _server_connected(self, socket_probe: QTcpSocket | None = None) -> None:
         if self._stopping or self._ready:
+            self._retire_probe(socket_probe)
             return
         self._probe_timer.stop()
-        socket_probe = self._probe_socket
-        if socket_probe is not None:
-            socket_probe.disconnectFromHost()
-            socket_probe.deleteLater()
-        self._probe_socket = None
+        self._retire_probe(socket_probe if socket_probe is not None else self._probe_socket)
         self._server_reachable = True
         self._maybe_ready()
 
@@ -391,20 +531,27 @@ class HarnessRuntime(QObject):
     def _process_finished(self, _exit_code: int, _status) -> None:
         self._read_output()
         process = self._process
+        was_ready = self._ready
         self._process = None
+        self._ready = False
+        self._server_reachable = False
         self._probe_timer.stop()
         self._deadline_timer.stop()
+        self._retire_probe(self._probe_socket)
         if process is not None:
+            process.blockSignals(True)
             process.deleteLater()
+        self._terminate_process_group(signal.SIGTERM)
+        self._kill_port_owner()
+        self._process_group_id = None
         if self._stopping:
-            self._kill_port_owner()
             self.stopped.emit()
-        elif not self._ready:
+        elif was_ready:
+            self.failed.emit("Harness 服务已停止，请重新启动。")
+        else:
             self.failed.emit(
                 "Harness 进程提前退出。请检查 Node.js、网络连接或查看 Harness 日志后重试。"
             )
-        else:
-            self.failed.emit("Harness 服务已停止，请重新启动。")
 
     def _startup_timed_out(self) -> None:
         if self._ready or self._stopping:

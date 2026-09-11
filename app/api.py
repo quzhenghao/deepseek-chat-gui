@@ -164,7 +164,6 @@ def build_chat_body(
         "stream": True,
         "thinking": {"type": "enabled" if deep_thinking else "disabled"},
     }
-    # 官方接口在思考模式下忽略温度，因此按模式二选一。
     if deep_thinking:
         body["reasoning_effort"] = (
             effort if effort in {"low", "high", "max"} else "high"

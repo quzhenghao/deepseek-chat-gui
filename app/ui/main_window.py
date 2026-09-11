@@ -4,7 +4,16 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QDir, QEvent, QTemporaryDir, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QCoreApplication,
+    QDir,
+    QEvent,
+    QPoint,
+    QTemporaryDir,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QIcon, QImage
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,14 +57,22 @@ from .image_strip import ImageStrip
 from .message_bubbles import AssistantBubble, ChatView
 from .controls import (
     ConfirmationDialog,
+    FrameAnimator,
     HoverTipManager,
     NoticeDialog,
     RoundedComboBox,
+    show_edit_menu,
 )
 from .settings_dialog import SettingsPage
 from .sidebar import ProductModeSelector, Sidebar
 from .harness_page import HarnessPage
-from .theme import SIDEBAR_DEFAULT_WIDTH, build_qss, colors
+from .theme import (
+    RAIL_SIDEBAR_WIDTH,
+    SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+    build_qss,
+    colors,
+)
 
 
 class ChatTextEdit(QTextEdit):
@@ -100,6 +117,27 @@ class ChatTextEdit(QTextEdit):
             return
         super().insertFromMimeData(source)
 
+    def contextMenuEvent(self, event) -> None:
+        """Standard edit actions on the app's flat, opaque menu surface."""
+
+        show_edit_menu(
+            self,
+            event.globalPos(),
+            undo_available=self.document().isUndoAvailable(),
+            redo_available=self.document().isRedoAvailable(),
+            has_selection=self.textCursor().hasSelection(),
+            can_paste=self.canPaste(),
+            handlers={
+                "undo": self.undo,
+                "redo": self.redo,
+                "cut": self.cut,
+                "copy": self.copy,
+                "paste": self.paste,
+                "delete": lambda: self.textCursor().removeSelectedText(),
+                "select_all": self.selectAll,
+            },
+        )
+
     def set_placeholder(self, vision: bool) -> None:
         text = "给 DeepSeek 发送消息"
         if vision:
@@ -135,6 +173,7 @@ class InputPanel(QWidget):
         self._vision = False
         self._generating = False
         self._thinking_available = True
+        self._action_icon_state: tuple[bool, bool, str] | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 6, 24, 14)
@@ -199,12 +238,17 @@ class InputPanel(QWidget):
         row.addWidget(self.card, 1)
         row.addStretch()
         root.addLayout(row)
-        hint = QLabel(
+        self.hint_label = QLabel(
             "Enter 发送 · Shift + Enter 换行 · 内容由 AI 生成，请仔细甄别"
         )
-        hint.setObjectName("tinyLabel")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(hint)
+        self.hint_label.setObjectName("composerHint")
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_row = QHBoxLayout()
+        hint_row.setContentsMargins(0, 0, 0, 0)
+        hint_row.addStretch()
+        hint_row.addWidget(self.hint_label)
+        hint_row.addStretch()
+        root.addLayout(hint_row)
 
         shadow = QGraphicsDropShadowEffect(self.card)
         shadow.setBlurRadius(26)
@@ -275,8 +319,28 @@ class InputPanel(QWidget):
 
     def _update_action(self) -> None:
         has_content = bool(self.editor.toPlainText().strip() or self.image_strip.paths())
-        self.action_button.setEnabled(self._generating or has_content)
-        self.apply_theme(self._theme)
+        enabled = self._generating or has_content
+        if self.action_button.isEnabled() != enabled:
+            self.action_button.setEnabled(enabled)
+        self._refresh_action_icon()
+
+    def _refresh_action_icon(self) -> None:
+        state = (
+            self._generating,
+            self.action_button.isEnabled(),
+            self._theme,
+        )
+        if state == self._action_icon_state:
+            return
+        self._action_icon_state = state
+        palette = colors(self._theme)
+        if self._generating:
+            apply_icon(self.action_button, "stop", "#FFFFFF", 18)
+            self.action_button.setToolTip("停止生成")
+        else:
+            color = "#FFFFFF" if self.action_button.isEnabled() else palette["fg_muted"]
+            apply_icon(self.action_button, "send", color, 19)
+            self.action_button.setToolTip("发送")
 
     def _image_urls(self, event) -> list[str]:
         if not event.mimeData().hasUrls():
@@ -318,13 +382,7 @@ class InputPanel(QWidget):
             palette["accent"] if self.is_thinking() else palette["fg_sub"],
             17,
         )
-        if self._generating:
-            apply_icon(self.action_button, "stop", "#FFFFFF", 18)
-            self.action_button.setToolTip("停止生成")
-        else:
-            color = "#FFFFFF" if self.action_button.isEnabled() else palette["fg_muted"]
-            apply_icon(self.action_button, "send", color, 19)
-            self.action_button.setToolTip("发送")
+        self._refresh_action_icon()
         self.image_strip.set_style(theme)
         self._shadow.setColor(QColor(palette["shadow"]))
 
@@ -334,9 +392,12 @@ class ChatWorkspace(QWidget):
 
     The empty state uses the same composer as a normal conversation, but lets
     it float into the visual center of the canvas.  Once a conversation has
-    messages the composer becomes a bottom dock and the message lane receives
-    an inset so the last answer is never hidden behind it.
+    messages the composer floats at the bottom of the canvas while the message
+    viewport ends directly above it.  The full-size stack keeps the surrounding
+    canvas continuous, so the card retains its floating silhouette.
     """
+
+    FOLLOW_BUTTON_GAP = 16
 
     def __init__(self, theme: str = "light", parent=None) -> None:
         super().__init__(parent)
@@ -348,7 +409,7 @@ class ChatWorkspace(QWidget):
         self._chat_view: ChatView | None = None
         self.follow_button = QToolButton(self)
         self.follow_button.setObjectName("followLatestBtn")
-        self.follow_button.setFixedSize(40, 40)
+        self.follow_button.setFixedSize(36, 36)
         self.follow_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.follow_button.setToolTip("回到最新消息并继续跟随")
         self.follow_button.hide()
@@ -371,7 +432,6 @@ class ChatWorkspace(QWidget):
         panel.image_strip.imagesChanged.connect(self._sync_layout)
         chat_view.followChanged.connect(lambda _enabled: self._sync_follow_button())
         self.follow_button.clicked.connect(chat_view.resume_follow)
-        # Keep a discoverable endpoint for callers that want to drive the UI.
         chat_view.follow_button = self.follow_button
         self._sync_layout()
 
@@ -407,27 +467,47 @@ class ChatWorkspace(QWidget):
         width = max(0, self.width())
         height = max(0, self.height())
         self._stack.setGeometry(0, 0, width, height)
-        panel_height = max(132, self._panel.sizeHint().height())
+        panel_height = min(height, max(132, self._panel.sizeHint().height()))
         self._panel.setGeometry(0, 0, width, panel_height)
 
         is_welcome = self._stack.currentWidget() is self._welcome
         if is_welcome:
-            panel_y = max(0, int(height * 0.66))
+            panel_y = max(0, int(height * 0.60))
             if self._chat_view is not None:
+                self._chat_view.set_composer_clearance(0)
                 self._chat_view.set_bottom_inset(18)
         else:
             panel_y = max(0, height - panel_height)
             if self._chat_view is not None:
-                self._chat_view.set_bottom_inset(panel_height + 18)
+                self._chat_view.set_composer_clearance(panel_height)
+                self._chat_view.set_bottom_inset(18)
         self._panel.move(0, panel_y)
         self._panel.raise_()
 
         if self._chat_view is not None and not is_welcome:
-            self.follow_button.move(
-                max(12, width - self.follow_button.width() - 22),
-                max(16, panel_y - self.follow_button.height() - 12),
-            )
+            self._place_follow_button()
         self._sync_follow_button()
+
+    def _place_follow_button(self) -> None:
+        """Park the control beside the submit button, on its exact baseline."""
+
+        if self._panel is None:
+            return
+        panel_layout = self._panel.layout()
+        if panel_layout is not None:
+            panel_layout.activate()
+        card_layout = self._panel.card.layout()
+        if card_layout is not None:
+            card_layout.activate()
+        anchor = self._panel.action_button
+        origin = anchor.mapTo(self, QPoint(0, 0))
+        size = self.follow_button.width()
+        left = origin.x() + anchor.width() + self.FOLLOW_BUTTON_GAP
+        top = origin.y() + (anchor.height() - size) // 2
+        self.follow_button.move(
+            min(left, max(12, self.width() - size - 12)),
+            max(12, top),
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -461,6 +541,12 @@ class MainWindow(QMainWindow):
         self._notice_dialog: NoticeDialog | None = None
         self._mode = "chat"
         self._closing = False
+        self._warm_start_armed = bool(cfg.get("harness_warm_start", True))
+        self._warm_start_pending = False
+        self._sidebar_collapsed = False
+        self._sidebar_animator = FrameAnimator(230, self)
+        self._sidebar_animator.valueChanged.connect(self._apply_sidebar_width)
+        self._sidebar_animator.finished.connect(self._finish_sidebar_transition)
         self._hover_tips = HoverTipManager(app, self._theme, self)
         draft_template = str(Path(QDir.tempPath()) / "deepseek-chat-draft-XXXXXX")
         self._draft_dir = QTemporaryDir(draft_template)
@@ -474,13 +560,30 @@ class MainWindow(QMainWindow):
         self.apply_theme(self._theme)
         self.refresh_sidebar()
         self.show_welcome()
-        if cfg.get("harness_warm_start", True):
-            # Give the Chat canvas a moment to become responsive, then let the
-            # official Harness runtime download/start in the background.  The
-            # page remains hidden until the user selects Harness.
-            QTimer.singleShot(900, self._warm_harness)
         if not cfg.get("api_key"):
             QTimer.singleShot(350, self.open_settings)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._warm_start_armed:
+            self._warm_start_armed = False
+            self._schedule_harness_warm()
+
+    def _schedule_harness_warm(self) -> None:
+        if (
+            self._closing
+            or self._app.platformName() == "offscreen"
+            or self._mode != "chat"
+            or not self.cfg.get("harness_warm_start", True)
+            or self._warm_start_pending
+        ):
+            return
+        self._warm_start_pending = True
+        QTimer.singleShot(0, self._run_scheduled_harness_warm)
+
+    def _run_scheduled_harness_warm(self) -> None:
+        self._warm_start_pending = False
+        self._warm_harness()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -517,6 +620,7 @@ class MainWindow(QMainWindow):
         self.sidebar.modeChanged.connect(self._switch_mode)
         self.sidebar.settingsRequested.connect(self.open_settings)
         self.sidebar.collapseRequested.connect(self._toggle_sidebar)
+        self.sidebar.expandRequested.connect(self._toggle_sidebar)
         self.splitter.addWidget(self.sidebar)
 
         right = QWidget()
@@ -562,15 +666,24 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([SIDEBAR_DEFAULT_WIDTH, 1280 - SIDEBAR_DEFAULT_WIDTH])
 
-        self.settings_page = SettingsPage(self.cfg)
-        self.settings_page.saveRequested.connect(self._save_settings)
-        self.settings_page.cancelRequested.connect(self._close_settings)
+        self._settings_page: SettingsPage | None = None
         self.harness_page = HarnessPage(self.cfg, self._theme)
         self.harness_page.modeRequested.connect(self._switch_mode)
         self.page_stack.addWidget(self.chat_page)
-        self.page_stack.addWidget(self.settings_page)
         self.page_stack.addWidget(self.harness_page)
         self.page_stack.setCurrentWidget(self.chat_page)
+
+    @property
+    def settings_page(self) -> SettingsPage:
+        page = self._settings_page
+        if page is None:
+            page = SettingsPage(self.cfg)
+            page.saveRequested.connect(self._save_settings)
+            page.cancelRequested.connect(self._close_settings)
+            page.apply_theme(self._theme)
+            self._settings_page = page
+            self.page_stack.addWidget(page)
+        return page
 
     def _build_mode_bar(self, parent_layout: QVBoxLayout) -> None:
         """Create the one product switcher shared by Chat and Harness."""
@@ -592,14 +705,8 @@ class MainWindow(QMainWindow):
         header.setObjectName("chatHeader")
         header.setFixedHeight(58)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(14, 8, 16, 8)
+        layout.setContentsMargins(20, 8, 16, 8)
         layout.setSpacing(8)
-
-        self.sidebar_button = QToolButton()
-        self.sidebar_button.setFixedSize(34, 34)
-        self.sidebar_button.setToolTip("展开或收起侧边栏")
-        self.sidebar_button.clicked.connect(self._toggle_sidebar)
-        layout.addWidget(self.sidebar_button)
 
         self.model_combo = RoundedComboBox(self._theme)
         self.model_combo.setObjectName("modelCombo")
@@ -616,11 +723,6 @@ class MainWindow(QMainWindow):
         self.api_status = QLabel()
         self.api_status.setObjectName("statusChip")
         layout.addWidget(self.api_status)
-        self.header_settings = QToolButton()
-        self.header_settings.setFixedSize(34, 34)
-        self.header_settings.setToolTip("设置")
-        self.header_settings.clicked.connect(self.open_settings)
-        layout.addWidget(self.header_settings)
         parent_layout.addWidget(header)
 
     def _build_welcome(self) -> QWidget:
@@ -676,7 +778,7 @@ class MainWindow(QMainWindow):
         center.addWidget(suggestions)
         center.addStretch()
         layout.addLayout(center)
-        layout.addStretch(3)
+        layout.addStretch(5)
         return page
 
     def show_welcome(self) -> None:
@@ -710,7 +812,7 @@ class MainWindow(QMainWindow):
             and self._mode == "chat"
             and self.cfg.get("harness_warm_start", True)
         ):
-            self.harness_page.start(silent=True)
+            self.harness_page.warm()
 
     def _use_suggestion(self, prompt: str) -> None:
         self.chat_input.setPlainText(prompt)
@@ -757,7 +859,40 @@ class MainWindow(QMainWindow):
             save_config(self.cfg)
 
     def _toggle_sidebar(self) -> None:
-        self.sidebar.setVisible(not self.sidebar.isVisible())
+        self.set_sidebar_collapsed(not self._sidebar_collapsed)
+
+    def set_sidebar_collapsed(self, collapsed: bool, animate: bool = True) -> None:
+        """Animate the chat sidebar between its full page and the icon rail."""
+
+        collapsed = bool(collapsed)
+        self._sidebar_collapsed = collapsed
+        target = RAIL_SIDEBAR_WIDTH if collapsed else SIDEBAR_DEFAULT_WIDTH
+        if collapsed:
+            self.sidebar.setMinimumWidth(RAIL_SIDEBAR_WIDTH)
+        self._sidebar_animator.stop()
+        start = self.sidebar.width() or SIDEBAR_DEFAULT_WIDTH
+        if not animate or start == target:
+            self._apply_sidebar_width(target)
+            self._finish_sidebar_transition()
+            return
+        self._sidebar_animator.start(start, target)
+
+    def _apply_sidebar_width(self, width: float) -> None:
+        sizes = self.splitter.sizes()
+        total = sum(sizes)
+        if total <= 0:
+            return
+        value = int(round(width))
+        value = max(RAIL_SIDEBAR_WIDTH, min(SIDEBAR_DEFAULT_WIDTH, value))
+        self.splitter.setSizes([value, max(0, total - value)])
+        self.sidebar.set_collapsed(value <= RAIL_SIDEBAR_WIDTH + 64)
+
+    def _finish_sidebar_transition(self) -> None:
+        if self._sidebar_collapsed:
+            self._apply_sidebar_width(RAIL_SIDEBAR_WIDTH)
+            return
+        self._apply_sidebar_width(SIDEBAR_DEFAULT_WIDTH)
+        self.sidebar.setMinimumWidth(SIDEBAR_MIN_WIDTH)
 
     def refresh_sidebar(self, selected: str | None = None) -> None:
         current = selected if selected is not None else self._current_conversation_id
@@ -778,8 +913,6 @@ class MainWindow(QMainWindow):
         if conversation is None:
             return
         self._current_conversation_id = conversation_id
-        # Give formula-capable message views their final visible width before
-        # restoring history so KaTeX can compute overflow and height once.
         self.chat_workspace.set_page(self.chat_view)
         self.chat_view.clear()
         for message in conversation.get("messages", []):
@@ -1070,7 +1203,6 @@ class MainWindow(QMainWindow):
         context = self._context
         if context is None:
             return
-        # 正文首段到达时，气泡会结束思考动画并显示答案。
         context.content += text
         if isValid(context.bubble):
             context.bubble.set_content(context.content)
@@ -1201,6 +1333,8 @@ class MainWindow(QMainWindow):
         worker.deleteLater()
 
     def open_settings(self) -> None:
+        if self._closing:
+            return
         self.settings_page.load_config(self.cfg)
         self.page_stack.setCurrentWidget(self.settings_page)
 
@@ -1212,9 +1346,6 @@ class MainWindow(QMainWindow):
         previous_model = self.current_model()
         self.cfg.update(values)
         save_config(self.cfg)
-        # Apply the same catalog migration used at startup. Doing this in
-        # memory keeps the settings flow deterministic even when persistence
-        # is mocked or temporarily unavailable.
         self.cfg = sanitize_config(self.cfg)
         self.harness_page.update_config(self.cfg)
         available_models = self.cfg.get("models", [])
@@ -1228,7 +1359,7 @@ class MainWindow(QMainWindow):
         self.input_panel.set_effort(values["default_effort"])
         self.apply_theme(values["theme"])
         if self.cfg.get("harness_warm_start", True):
-            QTimer.singleShot(500, self._warm_harness)
+            self._schedule_harness_warm()
         self._close_settings()
 
     def apply_theme(self, theme: str) -> None:
@@ -1251,15 +1382,14 @@ class MainWindow(QMainWindow):
         )
         self.chat_view.apply_theme(theme)
         self.input_panel.apply_theme(theme)
-        self.settings_page.apply_theme(theme)
+        if self._settings_page is not None:
+            self._settings_page.apply_theme(theme)
         self.harness_page.apply_theme(theme)
         self.model_combo.set_theme(theme)
         if self._notice_dialog is not None and isValid(self._notice_dialog):
             self._notice_dialog.apply_theme(theme)
             if self._notice_dialog.isVisible():
                 self._center_notice(self._notice_dialog)
-        apply_icon(self.sidebar_button, "sidebar", palette["fg_sub"], 20)
-        apply_icon(self.header_settings, "settings", palette["fg_sub"], 19)
         configured = bool((self.cfg.get("api_key") or "").strip())
         self.api_status.setText("API 已配置" if configured else "需要 API 密钥")
         if configured:
@@ -1272,7 +1402,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._closing = True
-        self.settings_page.cancel_pending_request()
+        self._warm_start_armed = False
+        self._warm_start_pending = False
+        if self._settings_page is not None:
+            self._settings_page.cancel_pending_request()
         if self._notice_dialog is not None and isValid(self._notice_dialog):
             self._notice_dialog.close()
         self._hover_tips.hide()
@@ -1281,6 +1414,8 @@ class MainWindow(QMainWindow):
             if not self._worker.wait(12000):
                 self._worker.terminate()
                 self._worker.wait(1000)
+        self._context = None
+        self._worker = None
         title_workers = list(self._title_workers)
         for worker in title_workers:
             worker.cancel()
@@ -1288,6 +1423,11 @@ class MainWindow(QMainWindow):
             if not worker.wait(5000):
                 worker.terminate()
                 worker.wait(1000)
+        self.chat_view.dispose()
         self.harness_page.stop()
+        for _ in range(2):
+            QCoreApplication.sendPostedEvents(
+                None, QEvent.Type.DeferredDelete
+            )
         self._draft_dir.remove()
         super().closeEvent(event)
