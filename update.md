@@ -2,6 +2,12 @@
 
 本次发布保持版本号 `v1.0.0`，用于覆盖更新 GitHub 上现有的说明和 Apple Silicon DMG。发布目标是把原生 Chat、官方 Harness 和本地渲染能力收拢到同一个可安装的 macOS 应用中。
 
+> ## ⚠️ 首次打开必须手动允许
+>
+> 本项目目前没有 Apple Developer ID 签名和 notarization。安装完成后第一次打开时，macOS 可能显示“无法验证开发者”或“Apple 无法检查‘DeepSeek’是否包含恶意软件”，并阻止应用运行。
+>
+> 请先在 Finder 中尝试打开一次应用，再进入 **系统设置 → 隐私与安全性**，向下滚动到“安全性”区域，点击 **“仍要打开”**，按系统提示确认后即可正常运行。请确认安装包来自本 Release。
+
 ## 主要变化
 
 ### Chat 与 Harness 一体化
@@ -47,22 +53,23 @@
 - Harness 只监听本机 loopback，API Key 通过进程环境传递，不写入 Harness YAML。
 - 应用退出时清理 Harness 子进程和临时资源。
 
-## 发布文件
+## 版本与安装包
 
-| 文件 | 平台 | 说明 |
-| --- | --- | --- |
-| `DeepSeek-1.0.0-macos-arm64.dmg` | macOS Apple Silicon | 当前 v1.0.0 安装包 |
+| 版本 | 平台 | 下载链接 | 状态 |
+| --- | --- | --- | --- |
+| `v1.0.0` | macOS Apple Silicon | [DeepSeek-1.0.0-macos-arm64.dmg](https://github.com/quzhenghao/deepseek-chat-gui/releases/download/v1.0.0/DeepSeek-1.0.0-macos-arm64.dmg) | 当前版本 |
+| `v1.0.0` | Windows | 暂无 | 待适配 |
 
 安装包由 PyInstaller 和系统 `hdiutil` 生成，DMG 中包含 `DeepSeek.app` 与 `/Applications` 快捷方式。Windows 和 Intel/universal 成品尚未发布，不上传占位文件。
 
 ## 安装与首次启动
 
-1. 下载 [DeepSeek-1.0.0-macos-arm64.dmg](https://github.com/quzhenghao/deepseek-chat-gui/releases/download/v1.0.0/DeepSeek-1.0.0-macos-arm64.dmg)。
+1. 在上面的“版本与安装包”列表中点击对应版本的安装包链接。
 2. 将 `DeepSeek.app` 拖到“应用程序”。
 3. 首次打开进入设置，填写 API Key，点击“测试连接”同步当前账号模型并保存。
 4. 返回 Chat；需要 Harness 时点击顶部 `Harness`。
 
-当前包使用本地 ad-hoc 签名，尚未接入 Apple Developer ID 签名与 notarization。如果 macOS 显示无法验证开发者，请确认 DMG 来自本项目 Release，先尝试打开一次，再到“系统设置 → 隐私与安全性 → 安全性”点击“仍要打开”。
+当前包使用本地 ad-hoc 签名，未接入 Apple Developer ID 签名与 notarization。遇到安全提示时，请按文档顶部的“系统设置 → 隐私与安全性 → 仍要打开”步骤操作。
 
 ## 验证范围
 

@@ -10,6 +10,12 @@
 >
 > 请从 Release 页面选择最新版本和对应平台的安装包。README 不固定指向某个旧版本文件，后续更新会持续以 Release 页面为准。
 
+## ⚠️ 首次打开安全提示
+
+本项目目前没有 Apple Developer ID 签名和 notarization。安装完成后第一次打开时，macOS 可能显示“无法验证开发者”或“Apple 无法检查‘DeepSeek’是否包含恶意软件”，并暂时阻止应用运行。
+
+请先在 Finder 中尝试打开一次应用，然后进入 **系统设置 → 隐私与安全性**，向下滚动到“安全性”区域，点击 **“仍要打开”**，按系统提示确认后即可正常运行。请先确认安装包来自本项目的 [GitHub Releases](https://github.com/quzhenghao/deepseek-chat-gui/releases)。
+
 ## 界面预览
 
 ### Chat 欢迎页
@@ -80,7 +86,7 @@
 3. 首次启动进入设置页，填写 API Key，点击“测试连接”，确认模型同步成功后保存设置。
 4. 返回 Chat，选择模型和思考强度即可开始使用；顶部 `Work Type` 可以切换到 Harness。
 
-当前 DMG 是 Apple Silicon 构建，适用于 arm64 Mac。安装包使用本地 ad-hoc 签名，尚未接入 Apple Developer ID 签名与 notarization。若 macOS 首次打开显示“无法验证开发者”或“Apple 无法检查‘DeepSeek’是否包含恶意软件”，请先尝试打开一次，再到“系统设置 → 隐私与安全性 → 安全性”点击“仍要打开”。确认安装包来自本项目后再执行此操作，详见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。
+当前 DMG 是 Apple Silicon 构建，适用于 arm64 Mac。首次打开遇到安全提示时，请按上方步骤在“隐私与安全性”中允许应用；相关背景可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。
 
 ## 从源码运行
 
