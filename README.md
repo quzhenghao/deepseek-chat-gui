@@ -4,7 +4,11 @@
 
 当前发布版本：`v1.0.0` · macOS Apple Silicon
 
-[下载 DeepSeek-1.0.0-macos-arm64.dmg](https://github.com/quzhenghao/deepseek-chat-gui/releases/download/v1.0.0/DeepSeek-1.0.0-macos-arm64.dmg) · [查看更新说明](update.md) · [查看 GitHub Releases](https://github.com/quzhenghao/deepseek-chat-gui/releases)
+## 最新版本与下载
+
+> **[前往 GitHub Releases 查看最新版本、更新日志和下载链接 →](https://github.com/quzhenghao/deepseek-chat-gui/releases)**
+>
+> 请从 Release 页面选择最新版本和对应平台的安装包。README 不固定指向某个旧版本文件，后续更新会持续以 Release 页面为准。
 
 ## 界面预览
 
@@ -25,6 +29,12 @@
 ![设置页面](assets/screenshots/settings.png)
 
 设置页提供 API 连接测试、模型列表、深度思考强度、主题、系统提示词和 Harness 运行环境管理。
+
+### 切换到 Harness
+
+![Harness 工作界面](assets/screenshots/harness.png)
+
+点击顶部 `Work Type` 的 `Harness` 即可进入官方 Harness Web UI。Chat 与 Harness 共用同一个窗口和运行环境，切换后可以直接选择工作区、创建会话并使用 Harness 的项目、工具和审批能力。
 
 ## 为什么使用本地客户端
 
@@ -65,8 +75,8 @@
 
 ## 安装
 
-1. 下载 [DeepSeek-1.0.0-macos-arm64.dmg](https://github.com/quzhenghao/deepseek-chat-gui/releases/download/v1.0.0/DeepSeek-1.0.0-macos-arm64.dmg)。
-2. 打开 DMG，把 `DeepSeek.app` 拖到“应用程序”。
+1. 前往 [GitHub Releases](https://github.com/quzhenghao/deepseek-chat-gui/releases)，打开最新版本页面并下载对应的 macOS DMG。
+2. 打开 DMG，把应用拖到“应用程序”。
 3. 首次启动进入设置页，填写 API Key，点击“测试连接”，确认模型同步成功后保存设置。
 4. 返回 Chat，选择模型和思考强度即可开始使用；顶部 `Work Type` 可以切换到 Harness。
 
