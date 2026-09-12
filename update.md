@@ -23,6 +23,7 @@
 - “测试连接”会读取 API 的 `/models`，把当前账号实际有权限的模型同步到设置页。
 - 同一客户端可以切换多个可用的付费模型，也支持自定义 API 地址和模型 ID；能否调用某个模型仍由 API 账号权限和服务端结果决定。
 - 保留深度思考、`low` / `high` / `max` 强度、图片输入和自定义系统提示词。
+- 对话支持联网搜索：输入框提供“联网搜索”开关，设置页可配置默认状态，由 DeepSeek Responses API 的 `web_search` 工具接入。
 
 ### 本地 Markdown 与数学内容
 
@@ -73,7 +74,7 @@
 
 ## 验证范围
 
-- Python 单元测试：覆盖 API、模型目录迁移、Markdown/LaTeX、配置、存储、Chat/Harness 切换和 UI 交互。
+- Python 单元测试：覆盖 API、联网搜索、模型目录迁移、Markdown/LaTeX、配置、存储、Chat/Harness 切换和 UI 交互。
 - UI 截图核验：欢迎页、复杂数学回答页、设置页。
 - DMG 构建：PyInstaller `.app`、内置 Node/Harness 运行时、Apple Silicon DMG。
 - 交互回归：弹窗单层圆角、文本选区、`I` 形光标、右键菜单不取消选区、复制与全选。

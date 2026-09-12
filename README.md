@@ -1,6 +1,6 @@
 # DeepSeek 本地桌面客户端
 
-一个面向 macOS 的 DeepSeek API 桌面客户端。它把 Chat、深度思考、图片输入、Markdown/LaTeX、本地历史和官方 Harness 集成到同一个窗口中，界面轻量，数据保存在本机，工作模式可以从顶部一键切换。
+一个面向 macOS 的 DeepSeek API 桌面客户端。它把 Chat、深度思考、联网搜索、图片输入、Markdown/LaTeX、本地历史和官方 Harness 集成到同一个窗口中，界面轻量，数据保存在本机，工作模式可以从顶部一键切换。
 
 当前发布版本：`v1.0.0` · macOS Apple Silicon
 
@@ -34,7 +34,7 @@
 
 ![设置页面](assets/screenshots/settings.png)
 
-设置页提供 API 连接测试、模型列表、深度思考强度、主题、系统提示词和 Harness 运行环境管理。
+设置页提供 API 连接测试、模型列表、深度思考强度、联网搜索默认开关、主题、系统提示词和 Harness 运行环境管理。
 
 ### 切换到 Harness
 
@@ -57,6 +57,7 @@
 
 - DeepSeek API 流式输出和深度思考
 - `low`、`high`、`max` 三档思考强度
+- 联网搜索按钮与“默认开启联网搜索”设置，通过 DeepSeek Responses API 的 `web_search` 工具接入
 - 视觉模型图片输入：选择、拖入或粘贴图片
 - Markdown、代码块、复制按钮、表格、引用、链接和离线 KaTeX
 - 用户与 AI 消息均可用文本光标选中

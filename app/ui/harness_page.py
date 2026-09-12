@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -152,6 +153,7 @@ class HarnessSurface(QWidget):
             self._awaiting_first_paint = True
             self._load_url(view, url)
         if self._awaiting_first_paint:
+            self.status_panel.show()
             self.status_panel.raise_()
         else:
             self._reveal_web()
@@ -211,7 +213,8 @@ class HarnessSurface(QWidget):
             )
             return
         self._awaiting_first_paint = False
-        self._reveal_web()
+        if self.isVisible():
+            self._reveal_web()
 
     def dispose(self) -> None:
         """Retire WebEngine objects through Qt's event loop.
@@ -307,6 +310,7 @@ class HarnessPage(QWidget):
         self._theme = theme
         self._started_once = False
         self._defer_surface = False
+        self._pending_url: str | None = None
         self._idle = IdleDispatcher(idle_ms=600, parent=self)
         self.surface = HarnessSurface(theme, self)
         self.surface.modeRequested.connect(self.modeRequested.emit)
@@ -315,6 +319,9 @@ class HarnessPage(QWidget):
         self.runtime.stateChanged.connect(self._on_state)
         self.runtime.ready.connect(self._on_ready)
         self.runtime.failed.connect(self._on_failed)
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state_changed)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.addWidget(self.surface)
@@ -332,6 +339,7 @@ class HarnessPage(QWidget):
             previous.get(key) != self._cfg.get(key) for key in runtime_inputs
         ):
             self._idle.cancel()
+            self._pending_url = None
             self._defer_surface = False
             self.runtime.stop()
             self.surface.show_status("Harness 配置已更新，下次进入时会重新启动。")
@@ -342,6 +350,7 @@ class HarnessPage(QWidget):
         self._started_once = True
         self._defer_surface = False
         self._idle.cancel()
+        self._pending_url = None
         if self.runtime.is_ready:
             self.surface.show_web(self.runtime.url)
             return
@@ -354,15 +363,19 @@ class HarnessPage(QWidget):
         self.runtime.start(working_directory)
 
     def warm(self) -> None:
-        """Start the runtime in the background and defer the heavy GUI work.
+        """Keep the runtime warm without disturbing the visible Chat surface.
 
-        The subprocess is the long pole, so it starts right away; building the
-        WebEngine surface blocks the GUI thread, so that part waits for an idle
-        moment instead of stuttering whatever the user is doing.
+        Starting ``dsh web`` is the slow part, so it launches immediately.
+        Creating the WebEngine surface can make macOS recomposite the whole
+        window, which reads as a flicker while Chat is on screen.  The surface
+        is therefore only built once the app is in the background or the user
+        explicitly opens Harness; both paths are covered by :meth:`_on_ready`
+        and :meth:`start`.
         """
 
         self._started_once = True
         self._defer_surface = True
+        self._pending_url = None
         self.runtime.start(self._working_directory())
 
     def _working_directory(self) -> Path:
@@ -381,15 +394,55 @@ class HarnessPage(QWidget):
         self.surface.show_status(text)
 
     def _on_ready(self, url: str) -> None:
-        if not self.isVisible():
-            self._idle.schedule(
-                lambda: self.surface.show_web(url),
-                delay_ms=150,
-            )
+        self._pending_url = url
+        if self.isVisible():
+            self._idle.cancel()
+            self.surface.show_web(url)
             return
+        self._maybe_schedule_surface_build()
+
+    def _maybe_schedule_surface_build(self) -> None:
+        """Build the WebEngine surface only when it cannot flash the window."""
+
+        if self._pending_url is None or self._idle.is_pending():
+            return
+        if self.isVisible() or not self._window_inactive():
+            return
+        self._idle.schedule(
+            self._build_deferred_surface,
+            delay_ms=150,
+            deadline_ms=6000,
+        )
+
+    def _build_deferred_surface(self) -> None:
+        """Create the warmed surface from a genuinely quiet background moment."""
+
+        url = self._pending_url
+        if url is None:
+            return
+        if not self.isVisible() and not self._window_inactive():
+            # The user came back before the idle gap closed.  Keep the runtime
+            # warm and let the next explicit visit build the surface.
+            return
+        self._pending_url = None
         self.surface.show_web(url)
 
+    def _window_inactive(self) -> bool:
+        window = self.window()
+        if window is None:
+            return True
+        app = QApplication.instance()
+        if app is not None:
+            return app.applicationState() != Qt.ApplicationState.ApplicationActive
+        return not window.isActiveWindow()
+
+    def _on_application_state_changed(self, state) -> None:
+        if state != Qt.ApplicationState.ApplicationActive:
+            self._maybe_schedule_surface_build()
+
     def _on_failed(self, message: str) -> None:
+        self._idle.cancel()
+        self._pending_url = None
         self.surface.show_status(message, failed=True)
         self.surface.set_detail(
             "可查看官方文档，确认 Node.js 22.19+ / 24+、网络和 API 密钥后再次启动。"
@@ -401,6 +454,7 @@ class HarnessPage(QWidget):
 
     def stop(self) -> None:
         self._defer_surface = False
+        self._pending_url = None
         self._idle.cancel()
         self.runtime.stop()
         self.surface.dispose()

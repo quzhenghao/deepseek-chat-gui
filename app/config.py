@@ -63,6 +63,7 @@ DEFAULTS: dict[str, Any] = {
     "default_effort": "high",
     "last_effort": "high",
     "deep_thinking": True,
+    "web_search": True,
     "temperature": 1.0,
     "max_tokens": 0,
     "theme": "light",
@@ -166,6 +167,7 @@ def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["default_effort"] = _normalize_effort(cfg.get("default_effort"))
     cfg["last_effort"] = _normalize_effort(cfg.get("last_effort"))
     cfg["deep_thinking"] = bool(cfg.get("deep_thinking", True))
+    cfg["web_search"] = bool(cfg.get("web_search", True))
 
     base_url = str(cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
     if base_url == "https://api.deepseek.com/v1":

@@ -155,6 +155,7 @@ class InputPanel(QWidget):
     submitRequested = Signal()
     stopRequested = Signal()
     thinkingChanged = Signal(bool)
+    webSearchChanged = Signal(bool)
     effortChanged = Signal(str)
     notice = Signal(str)
 
@@ -162,6 +163,7 @@ class InputPanel(QWidget):
         self,
         editor: ChatTextEdit,
         thinking: bool,
+        web_search: bool,
         effort: str,
         theme: str,
         parent=None,
@@ -215,6 +217,15 @@ class InputPanel(QWidget):
         self.thinking_button.toggled.connect(self._thinking_toggled)
         toolbar.addWidget(self.thinking_button)
 
+        self.search_button = QPushButton("联网搜索")
+        self.search_button.setObjectName("searchBtn")
+        self.search_button.setCheckable(True)
+        self.search_button.setChecked(web_search)
+        self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_button.setToolTip("使用 DeepSeek Responses API 联网搜索")
+        self.search_button.toggled.connect(self._web_search_toggled)
+        toolbar.addWidget(self.search_button)
+
         self.effort_combo = RoundedComboBox(theme)
         self.effort_combo.setObjectName("effortCombo")
         for value in EFFORT_LEVELS:
@@ -264,8 +275,14 @@ class InputPanel(QWidget):
     def is_thinking(self) -> bool:
         return self.thinking_button.isChecked()
 
+    def is_web_search(self) -> bool:
+        return self.search_button.isChecked()
+
     def set_thinking(self, enabled: bool) -> None:
         self.thinking_button.setChecked(enabled and self._thinking_available)
+
+    def set_web_search(self, enabled: bool) -> None:
+        self.search_button.setChecked(enabled)
 
     def set_thinking_available(self, enabled: bool) -> None:
         self._thinking_available = enabled
@@ -296,6 +313,7 @@ class InputPanel(QWidget):
         self.editor.setReadOnly(generating)
         self.attach_button.setEnabled(not generating)
         self.thinking_button.setEnabled(self._thinking_available and not generating)
+        self.search_button.setEnabled(not generating)
         self.effort_combo.setEnabled(
             self._thinking_available and not generating and self.is_thinking()
         )
@@ -309,6 +327,10 @@ class InputPanel(QWidget):
             enabled and self._thinking_available and not self._generating
         )
         self.thinkingChanged.emit(enabled)
+        self.apply_theme(self._theme)
+
+    def _web_search_toggled(self, enabled: bool) -> None:
+        self.webSearchChanged.emit(enabled)
         self.apply_theme(self._theme)
 
     def _trigger_action(self) -> None:
@@ -380,6 +402,12 @@ class InputPanel(QWidget):
             self.thinking_button,
             "sparkle",
             palette["accent"] if self.is_thinking() else palette["fg_sub"],
+            17,
+        )
+        apply_icon(
+            self.search_button,
+            "globe",
+            palette["accent"] if self.is_web_search() else palette["fg_sub"],
             17,
         )
         self._refresh_action_icon()
@@ -521,6 +549,7 @@ class StreamContext:
     model: str
     effort: str
     thinking: bool
+    web_search: bool = False
     content: str = ""
     reasoning: str = ""
     stopped: bool = False
@@ -640,6 +669,7 @@ class MainWindow(QMainWindow):
         self.input_panel = InputPanel(
             self.chat_input,
             bool(self.cfg.get("deep_thinking", True)),
+            bool(self.cfg.get("web_search", True)),
             self.cfg.get("last_effort", "high"),
             self._theme,
             parent=self.chat_workspace,
@@ -651,6 +681,7 @@ class MainWindow(QMainWindow):
         self.input_panel.submitRequested.connect(self.on_send)
         self.input_panel.stopRequested.connect(self.on_stop)
         self.input_panel.thinkingChanged.connect(self._thinking_changed)
+        self.input_panel.webSearchChanged.connect(self._web_search_changed)
         self.input_panel.effortChanged.connect(self._effort_changed)
         self.input_panel.notice.connect(self._show_notice)
         self.chat_workspace.attach(
@@ -853,6 +884,10 @@ class MainWindow(QMainWindow):
         self.cfg["deep_thinking"] = enabled
         save_config(self.cfg)
 
+    def _web_search_changed(self, enabled: bool) -> None:
+        self.cfg["web_search"] = enabled
+        save_config(self.cfg)
+
     def _effort_changed(self, effort: str) -> None:
         if effort in EFFORT_LEVELS:
             self.cfg["last_effort"] = effort
@@ -932,6 +967,7 @@ class MainWindow(QMainWindow):
                         message.get("model", ""),
                         message.get("effort", ""),
                         thinking,
+                        bool(message.get("web_search", False)),
                     ),
                     thinking=thinking,
                     stopped=bool(message.get("stopped", False)),
@@ -1120,6 +1156,7 @@ class MainWindow(QMainWindow):
         model = self.current_model()
         effort = self.input_panel.current_effort()
         thinking = self.input_panel.is_thinking()
+        web_search = self.input_panel.is_web_search()
         system_prompt = str(self.cfg.get("system_prompt") or "").strip()
         if is_first_turn and system_prompt:
             self.store.append_message(
@@ -1137,6 +1174,7 @@ class MainWindow(QMainWindow):
             "model": model,
             "effort": effort,
             "thinking": thinking,
+            "web_search": web_search,
         }
         self.store.append_message(conversation_id, user_message)
         self.chat_workspace.set_page(self.chat_view)
@@ -1144,13 +1182,23 @@ class MainWindow(QMainWindow):
         self.input_panel.image_strip.clear()
         self.chat_input.clear()
         self.refresh_sidebar(conversation_id)
-        self._start_request(conversation_id, model, effort, thinking)
+        self._start_request(conversation_id, model, effort, thinking, web_search)
 
     @staticmethod
-    def _message_meta(model: str, effort: str, thinking: bool) -> str:
+    def _message_meta(
+        model: str,
+        effort: str,
+        thinking: bool,
+        web_search: bool = False,
+    ) -> str:
+        parts: list[str] = [model_label(model)]
         if thinking:
-            return f"{model_label(model)} · 深度思考 {effort_label(effort)}"
-        return f"{model_label(model)} · 标准模式"
+            parts.append(f"深度思考 {effort_label(effort)}")
+        else:
+            parts.append("标准模式")
+        if web_search:
+            parts.append("联网搜索")
+        return " · ".join(parts)
 
     def _start_request(
         self,
@@ -1158,6 +1206,7 @@ class MainWindow(QMainWindow):
         model: str,
         effort: str,
         thinking: bool,
+        web_search: bool,
     ) -> None:
         conversation = self.store.get(conversation_id)
         if conversation is None:
@@ -1168,7 +1217,7 @@ class MainWindow(QMainWindow):
             self.chat_view.add_error(f"无法读取图片：{exc}")
             return
         bubble = self.chat_view.add_streaming(
-            self._message_meta(model, effort, thinking), thinking
+            self._message_meta(model, effort, thinking, web_search), thinking
         )
         self._context = StreamContext(
             conversation_id,
@@ -1176,6 +1225,7 @@ class MainWindow(QMainWindow):
             model,
             effort,
             thinking,
+            web_search,
         )
         worker = ChatWorker(
             self.cfg,
@@ -1185,6 +1235,7 @@ class MainWindow(QMainWindow):
             messages,
             float(self.cfg.get("temperature", 1.0)),
             int(self.cfg.get("max_tokens", 0)),
+            web_search,
         )
         self._worker = worker
         worker.chunk.connect(self._on_chunk)
@@ -1226,6 +1277,7 @@ class MainWindow(QMainWindow):
             "model": context.model,
             "effort": context.effort,
             "thinking": context.thinking,
+            "web_search": context.web_search,
             "stopped": context.stopped,
         }
 
@@ -1356,6 +1408,7 @@ class MainWindow(QMainWindow):
         )
         self._rebuild_models(selected)
         self.input_panel.set_thinking(values["deep_thinking"])
+        self.input_panel.set_web_search(values["web_search"])
         self.input_panel.set_effort(values["default_effort"])
         self.apply_theme(values["theme"])
         if self.cfg.get("harness_warm_start", True):

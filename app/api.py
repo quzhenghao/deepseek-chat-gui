@@ -175,6 +175,88 @@ def build_chat_body(
     return body
 
 
+def responses_input(history: list[dict]) -> list[dict]:
+    """Convert stored dialogue turns into DeepSeek Responses API input items."""
+
+    items: list[dict] = []
+    for message in history:
+        role = message.get("role")
+        if role not in {"user", "assistant", "system"}:
+            continue
+        content = message.get("content") or ""
+        images = message.get("images") or []
+        if isinstance(content, list):
+            parts: list[dict] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "text" and part.get("text"):
+                    parts.append({"type": "input_text", "text": str(part["text"])})
+                elif part_type == "image_url":
+                    image_url = part.get("image_url")
+                    url = (
+                        image_url.get("url")
+                        if isinstance(image_url, dict)
+                        else image_url
+                    )
+                    if url:
+                        parts.append({"type": "input_image", "image_url": str(url)})
+            if parts:
+                items.append({"role": role, "content": parts})
+            else:
+                items.append({"role": role, "content": ""})
+            continue
+        if role == "user" and images:
+            parts: list[dict] = []
+            if str(content).strip():
+                parts.append({"type": "input_text", "text": str(content)})
+            for image_path in images:
+                try:
+                    parts.append(
+                        {
+                            "type": "input_image",
+                            "image_url": _encode_image(image_path),
+                        }
+                    )
+                except OSError:
+                    continue
+            if not parts:
+                parts.append({"type": "input_text", "text": "请查看图片。"})
+            items.append({"role": "user", "content": parts})
+        else:
+            items.append({"role": role, "content": str(content)})
+    return items
+
+
+def build_search_body(
+    model: str,
+    effort: str,
+    deep_thinking: bool,
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+) -> dict:
+    """Build a Responses API request that asks DeepSeek to search the web."""
+
+    body: dict = {
+        "model": model,
+        "input": responses_input(messages),
+        "stream": True,
+        "tools": [{"type": "web_search"}],
+    }
+    if deep_thinking:
+        body["reasoning"] = {
+            "effort": effort if effort in {"low", "high", "max"} else "high"
+        }
+    else:
+        body["reasoning"] = {"effort": "none"}
+        body["temperature"] = temperature
+    if max_tokens > 0:
+        body["max_output_tokens"] = max_tokens
+    return body
+
+
 def _extract_parts(payload: dict) -> list[tuple[str, str]]:
     error = payload.get("error") if isinstance(payload, dict) else None
     if error:
@@ -192,6 +274,37 @@ def _extract_parts(payload: dict) -> list[tuple[str, str]]:
             parts.append(("reasoning", str(reasoning)))
         if content:
             parts.append(("content", str(content)))
+    return parts
+
+
+def _extract_search_delta(payload: dict) -> list[tuple[str, str]]:
+    event = str(payload.get("type") or "")
+    delta = payload.get("delta")
+    if event == "response.reasoning_text.delta" and delta:
+        return [("reasoning", str(delta))]
+    if event == "response.output_text.delta" and delta:
+        return [("content", str(delta))]
+    return []
+
+
+def _extract_search_response(payload: dict) -> list[tuple[str, str]]:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if error:
+        if isinstance(error, dict):
+            raise APIError(str(error.get("message") or error))
+        raise APIError(str(error))
+    parts: list[tuple[str, str]] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content") or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text") or ""
+            if part.get("type") == "reasoning_text" and text:
+                parts.append(("reasoning", str(text)))
+            elif part.get("type") == "output_text" and text:
+                parts.append(("content", str(text)))
     return parts
 
 
@@ -246,7 +359,23 @@ def stream_chat(
     stop: threading.Event,
     timeout: tuple[int, int] = (10, 600),
     response_callback: Callable[[requests.Response | None], None] | None = None,
+    *,
+    web_search: bool = False,
 ) -> Iterator[tuple[str, str]]:
+    if web_search:
+        yield from stream_search(
+            cfg,
+            model,
+            effort,
+            deep_thinking,
+            messages,
+            temperature,
+            max_tokens,
+            stop,
+            timeout=timeout,
+            response_callback=response_callback,
+        )
+        return
     body = build_chat_body(
         model, effort, deep_thinking, messages, temperature, max_tokens
     )
@@ -294,6 +423,82 @@ def stream_chat(
                 except json.JSONDecodeError:
                     continue
                 yield from _extract_parts(payload)
+    except requests.RequestException as exc:
+        raise APIError(f"网络请求失败：{exc}") from exc
+    finally:
+        if response_callback:
+            response_callback(None)
+
+
+def stream_search(
+    cfg: dict,
+    model: str,
+    effort: str,
+    deep_thinking: bool,
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    stop: threading.Event,
+    timeout: tuple[int, int] = (10, 600),
+    response_callback: Callable[[requests.Response | None], None] | None = None,
+) -> Iterator[tuple[str, str]]:
+    """Stream a web-enabled answer through the official Responses API."""
+
+    body = build_search_body(
+        model, effort, deep_thinking, messages, temperature, max_tokens
+    )
+    headers = {
+        "Authorization": f"Bearer {cfg.get('api_key') or ''}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    if stop.is_set():
+        return
+    response: requests.Response | None = None
+    try:
+        response = requests.post(
+            _endpoint(cfg, "responses"),
+            headers=headers,
+            json=body,
+            stream=True,
+            timeout=timeout,
+        )
+        if response_callback:
+            response_callback(response)
+        with response:
+            if response.status_code != 200:
+                raise APIError(_response_error(response))
+            response.encoding = "utf-8"
+            if "application/json" in response.headers.get("Content-Type", ""):
+                try:
+                    yield from _extract_search_response(response.json())
+                except ValueError as exc:
+                    raise APIError("DeepSeek 返回了无效 JSON") from exc
+                return
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if stop.is_set():
+                    return
+                line = (raw_line or "").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                event = str(payload.get("type") or "")
+                if event == "response.completed":
+                    return
+                if event in {"response.failed", "response.incomplete"}:
+                    error = payload.get("error")
+                    if isinstance(error, dict):
+                        detail = error.get("message") or error.get("code") or ""
+                        if detail:
+                            raise APIError(str(detail))
+                    return
+                yield from _extract_search_delta(payload)
     except requests.RequestException as exc:
         raise APIError(f"网络请求失败：{exc}") from exc
     finally:

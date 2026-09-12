@@ -217,6 +217,113 @@ class APITests(unittest.TestCase):
             )
         self.assertEqual(result, [("reasoning", "过程"), ("content", "结论")])
 
+    def test_search_body_declares_web_search_tool(self) -> None:
+        body = api.build_search_body(
+            "deepseek-flash",
+            "max",
+            True,
+            [{"role": "user", "content": "最新新闻"}],
+            0.5,
+            2048,
+        )
+        self.assertEqual(body["tools"], [{"type": "web_search"}])
+        self.assertEqual(body["reasoning"], {"effort": "max"})
+        self.assertEqual(body["max_output_tokens"], 2048)
+        self.assertNotIn("temperature", body)
+
+    def test_search_body_disables_reasoning_in_standard_mode(self) -> None:
+        body = api.build_search_body(
+            "deepseek-flash",
+            "high",
+            False,
+            [{"role": "user", "content": "最新新闻"}],
+            0.7,
+            0,
+        )
+        self.assertEqual(body["tools"], [{"type": "web_search"}])
+        self.assertEqual(body["reasoning"], {"effort": "none"})
+        self.assertEqual(body["temperature"], 0.7)
+        self.assertNotIn("max_output_tokens", body)
+
+    def test_responses_input_converts_user_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "tiny.png"
+            image.write_bytes(b"png")
+            items = api.responses_input(
+                [
+                    {"role": "system", "content": "系统提示"},
+                    {"role": "user", "content": "看图", "images": [str(image)]},
+                    {"role": "assistant", "content": "收到"},
+                ]
+            )
+        self.assertEqual(
+            items[0],
+            {"role": "system", "content": "系统提示"},
+        )
+        parts = items[1]["content"]
+        self.assertEqual(parts[0], {"type": "input_text", "text": "看图"})
+        self.assertEqual(parts[1]["type"], "input_image")
+        self.assertTrue(parts[1]["image_url"].startswith("data:image/png;base64,"))
+        self.assertEqual(items[2], {"role": "assistant", "content": "收到"})
+
+    def test_responses_input_accepts_payload_message_parts(self) -> None:
+        items = api.responses_input(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "看图"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,cG5n"},
+                        },
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(
+            items[0],
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "看图"},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,cG5n",
+                    },
+                ],
+            },
+        )
+
+    def test_search_stream_parses_responses_events(self) -> None:
+        lines = [
+            'data: {"type":"response.created","sequence_number":0}',
+            'data: {"type":"response.reasoning_text.delta","delta":"思考"}',
+            'data: {"type":"response.output_text.delta","delta":"答案"}',
+            'data: {"type":"response.completed"}',
+        ]
+        response = ResponseContext(lines)
+        with patch("app.api.requests.post", return_value=response) as post:
+            result = list(
+                api.stream_chat(
+                    {"api_key": "test", "base_url": "https://api.deepseek.com"},
+                    "deepseek-flash",
+                    "high",
+                    True,
+                    [{"role": "user", "content": "test"}],
+                    1.0,
+                    0,
+                    threading.Event(),
+                    web_search=True,
+                )
+            )
+        self.assertEqual(result, [("reasoning", "思考"), ("content", "答案")])
+        self.assertTrue(post.call_args.args[0].endswith("/responses"))
+        self.assertEqual(
+            post.call_args.kwargs["json"]["tools"],
+            [{"type": "web_search"}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

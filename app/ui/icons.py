@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import cos, pi, radians, sin, sqrt
+from math import sqrt
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -16,43 +16,33 @@ def _path(points: list[tuple[float, float]], closed: bool = False) -> QPainterPa
 
 
 def _cog_path(center: float = 12.0) -> QPainterPath:
-    """Six-lobed cog outline matching the Harness settings glyph.
+    """Regular six-tooth vector cog generated from one repeated profile."""
 
-    The silhouette is the union of six overlapping rounded teeth, traced from
-    the first-party artwork.  Sampling the union keeps the scalloped joins of
-    the Harness glyph instead of the angular teeth of a classic spoked gear.
-    """
-
-    base_radius = 6.07
-    tooth_distance = 6.27
-    tooth_radius = 3.95
-    tooth_offset = radians(30)
-    step = 0.5
-    path = QPainterPath()
-    for index in range(int(round(360 / step)) + 1):
-        angle = radians(index * step)
-        direction = (cos(angle), sin(angle))
-        radius = base_radius
-        for tooth in range(6):
-            theta = tooth_offset + tooth * pi / 3
-            center_x = tooth_distance * cos(theta)
-            center_y = tooth_distance * sin(theta)
-            projection = direction[0] * center_x + direction[1] * center_y
-            discriminant = projection * projection - (
-                tooth_distance * tooth_distance - tooth_radius * tooth_radius
+    tooth = (
+        (-3.2, -6.7),
+        (-2.0, -9.1),
+        (2.0, -9.1),
+        (3.2, -6.7),
+    )
+    half_sqrt_three = sqrt(3.0) / 2.0
+    rotations = (
+        (1.0, 0.0),
+        (0.5, half_sqrt_three),
+        (-0.5, half_sqrt_three),
+        (-1.0, 0.0),
+        (-0.5, -half_sqrt_three),
+        (0.5, -half_sqrt_three),
+    )
+    points = []
+    for cosine, sine in rotations:
+        for x, y in tooth:
+            points.append(
+                (
+                    center + x * cosine - y * sine,
+                    center + x * sine + y * cosine,
+                )
             )
-            if discriminant > 0:
-                radius = max(radius, projection + sqrt(discriminant))
-        point = QPointF(
-            center + direction[0] * radius,
-            center + direction[1] * radius,
-        )
-        if index == 0:
-            path.moveTo(point)
-        else:
-            path.lineTo(point)
-    path.closeSubpath()
-    return path
+    return _path(points, True)
 
 
 def _paint(painter: QPainter, name: str, color: QColor) -> None:
@@ -144,6 +134,12 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
         painter.drawPath(_path(points, True))
         painter.drawLine(QPointF(18.5, 4), QPointF(18.5, 7))
         painter.drawLine(QPointF(17, 5.5), QPointF(20, 5.5))
+    elif name == "globe":
+        painter.drawEllipse(QPointF(12, 12), 7.4, 7.4)
+        painter.drawEllipse(QPointF(12, 12), 3.1, 7.4)
+        painter.drawLine(QPointF(4.6, 12), QPointF(19.4, 12))
+        painter.drawLine(QPointF(5.8, 8.2), QPointF(18.2, 8.2))
+        painter.drawLine(QPointF(5.8, 15.8), QPointF(18.2, 15.8))
     elif name == "check":
         painter.drawPath(_path([(5.5, 12.5), (9.7, 16.5), (18.5, 7.5)]))
     elif name == "edit":

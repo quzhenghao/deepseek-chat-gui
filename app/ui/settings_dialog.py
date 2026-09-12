@@ -272,6 +272,9 @@ class SettingsPage(QWidget):
         self.deep_thinking = QCheckBox("默认开启深度思考")
         generation_form.addRow("思考模式", self.deep_thinking)
 
+        self.web_search = QCheckBox("默认开启联网搜索")
+        generation_form.addRow("联网搜索", self.web_search)
+
         self.default_effort = RoundedComboBox(self._theme)
         for effort in EFFORT_LEVELS:
             self.default_effort.addItem(effort_label(effort), effort)
@@ -482,6 +485,7 @@ class SettingsPage(QWidget):
         self.base_url.setText(str(cfg.get("base_url", DEFAULT_BASE_URL)))
         self._fill_models(cfg.get("models", []), cfg.get("default_model", ""))
         self.deep_thinking.setChecked(bool(cfg.get("deep_thinking", True)))
+        self.web_search.setChecked(bool(cfg.get("web_search", True)))
         effort_index = self.default_effort.findData(cfg.get("default_effort", "high"))
         self.default_effort.setCurrentIndex(max(0, effort_index))
         self.max_tokens.setValue(int(cfg.get("max_tokens", 0)))
@@ -725,6 +729,7 @@ class SettingsPage(QWidget):
             "default_model": self.default_model.currentData(),
             "default_effort": self.default_effort.currentData(),
             "deep_thinking": self.deep_thinking.isChecked(),
+            "web_search": self.web_search.isChecked(),
             "max_tokens": self.max_tokens.value(),
             "theme": self.theme_combo.currentData(),
             "system_prompt": self.system_prompt_edit.toPlainText().strip(),

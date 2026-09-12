@@ -253,11 +253,11 @@ QPushButton#newChatButton:hover {{
     background: {c['hover']};
     border-color: {c['border_strong']};
 }}
-QPushButton#thinkingBtn {{
+QPushButton#thinkingBtn, QPushButton#searchBtn {{
     color: {c['fg_sub']};
     padding: 5px 9px;
 }}
-QPushButton#thinkingBtn:checked {{
+QPushButton#thinkingBtn:checked, QPushButton#searchBtn:checked {{
     color: {c['accent']};
     background: {c['accent_soft']};
 }}

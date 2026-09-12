@@ -22,6 +22,7 @@ class ChatWorker(QThread):
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        web_search: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -32,6 +33,7 @@ class ChatWorker(QThread):
         self._messages = messages
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self._web_search = web_search
         self._stop = threading.Event()
         self._response_lock = threading.Lock()
         self._response = None
@@ -66,6 +68,7 @@ class ChatWorker(QThread):
                 self._temperature,
                 self._max_tokens,
                 self._stop,
+                web_search=self._web_search,
                 response_callback=self._set_response,
             ):
                 if self._stop.is_set():

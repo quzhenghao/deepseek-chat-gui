@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr
+from math import sqrt
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from PySide6.QtGui import QHelpEvent, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QMenu,
     QPushButton,
     QTextBrowser,
@@ -52,7 +54,7 @@ from app.ui.controls import (
     RoundedComboBox,
     RoundedMenu,
 )
-from app.ui.icons import icon
+from app.ui.icons import _cog_path, icon
 from app.ui.harness_page import HarnessSurface
 from app.ui.main_window import ChatTextEdit, MainWindow
 from app.ui.message_bubbles import (
@@ -384,6 +386,30 @@ class UITests(unittest.TestCase):
         window = MainWindow(cfg, MemoryStore(), self.app)
         self.assertEqual(window.current_model(), "deepseek-flash")
         self.assertTrue(window.input_panel.is_thinking())
+        self.assertTrue(window.input_panel.is_web_search())
+        window.close()
+
+    def test_web_search_control_defaults_on_and_sits_right_of_thinking(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        thinking = window.input_panel.thinking_button
+        search = window.input_panel.search_button
+        self.assertEqual(search.objectName(), "searchBtn")
+        self.assertTrue(search.isChecked())
+        self.assertEqual(search.height(), thinking.height())
+        self.assertGreater(search.geometry().left(), thinking.geometry().left())
+        self.assertFalse(search.icon().isNull())
+
+        with patch("app.ui.main_window.save_config") as save:
+            search.click()
+            self.app.processEvents()
+        self.assertFalse(window.cfg["web_search"])
+        save.assert_called_once()
         window.close()
 
     def test_controls_keep_values_when_wheeled(self) -> None:
@@ -441,7 +467,7 @@ class UITests(unittest.TestCase):
         menu.close()
         menu.deleteLater()
 
-    def test_confirmation_dialog_has_symmetric_rounded_actions(self) -> None:
+    def test_confirmation_dialog_uses_one_flat_surface(self) -> None:
         dialog = ConfirmationDialog(
             "删除对话",
             "确定删除“测试对话”吗？\n对话消息和本地图片会一起删除。",
@@ -451,51 +477,48 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertEqual(dialog.windowType(), Qt.WindowType.Tool)
+        self.assertTrue(dialog.windowFlags() & Qt.WindowType.NoDropShadowWindowHint)
         self.assertEqual(dialog.no_button.text(), "No")
         self.assertEqual(dialog.yes_button.text(), "Yes")
         self.assertEqual(dialog.no_button.size(), dialog.yes_button.size())
-        action_midpoint = (
-            dialog.no_button.geometry().center().x()
-            + dialog.yes_button.geometry().center().x()
-        ) / 2
-        self.assertAlmostEqual(
-            action_midpoint, dialog.card.rect().center().x(), delta=1
-        )
+        self.assertEqual(dialog.no_button.y(), dialog.yes_button.y())
+        self.assertLess(dialog.no_button.x(), dialog.yes_button.x())
+        self.assertLess(dialog.message.y(), dialog.no_button.y())
         self.assertTrue(dialog.no_button.isDefault())
-        self.assertFalse(dialog.question_badge.pixmap().isNull())
+        self.assertEqual(dialog.title_label.text(), "删除对话")
+        self.assertEqual(
+            dialog.message.text(),
+            "确定删除“测试对话”吗？\n对话消息和本地图片会一起删除。",
+        )
+        self.assertIs(dialog.title_label.parentWidget(), dialog)
+        self.assertIs(dialog.message.parentWidget(), dialog)
+        self.assertFalse(hasattr(dialog, "card"))
+        self.assertFalse(dialog.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
         dialog_surface = (
             dialog.styleSheet()
             .split("QDialog#confirmationDialog {", 1)[1]
             .split("}", 1)[0]
         )
-        self.assertIn("background: transparent;", dialog_surface)
-        self.assertIn("border: none;", dialog_surface)
-        self.assertEqual(dialog._surface_radius, 16.0)
-        card_surface = (
-            dialog.card.styleSheet()
-            .split("QFrame#confirmationCard {", 1)[1]
-            .split("}", 1)[0]
-        )
-        self.assertIn("background: transparent;", card_surface)
-        self.assertIn("border: none;", card_surface)
-        self.assertNotIn("background: #FFFFFF;", card_surface)
-        self.assertIn("border-radius: 10px", dialog.card.styleSheet())
-        self.assertIn("background: #FFF1F0", dialog.card.styleSheet())
-        margins = dialog.layout().contentsMargins()
-        self.assertEqual(
-            (margins.left(), margins.top(), margins.right(), margins.bottom()),
-            (0, 0, 0, 0),
-        )
-        self.assertEqual(dialog.card.geometry(), dialog.rect())
-        self.assertIsNone(dialog.card.graphicsEffect())
+        self.assertIn("background: #FFFFFF;", dialog_surface)
+        self.assertIn("border: 1px solid #D4D6D9;", dialog_surface)
+        self.assertNotIn("border-radius", dialog_surface)
+        self.assertEqual(dialog.grab().toImage().pixelColor(0, 0).alpha(), 255)
 
         dialog.apply_theme("dark")
-        self.assertEqual(dialog._surface_panel, colors("dark")["panel"])
-        self.assertEqual(dialog._surface_border, colors("dark")["border_strong"])
-        self.assertIn("background: transparent;", dialog.styleSheet())
-        self.assertIn("background: transparent;", dialog.card.styleSheet())
-        dialog.close()
+        self.app.processEvents()
+        self.assertIn("background: #222222;", dialog.styleSheet())
+        self.assertIn("border: 1px solid #454545;", dialog.styleSheet())
+        self.assertEqual(dialog.grab().toImage().pixelColor(0, 0).alpha(), 255)
+        dialog.no_button.click()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
         dialog.deleteLater()
+
+        confirmed = ConfirmationDialog("删除对话", "确定删除吗？", "light")
+        confirmed.show()
+        self.app.processEvents()
+        confirmed.yes_button.click()
+        self.assertEqual(confirmed.result(), QDialog.DialogCode.Accepted)
+        confirmed.deleteLater()
 
     def test_chat_composer_input_paints_the_card_surface(self) -> None:
         for theme in ("light", "dark"):
@@ -775,6 +798,34 @@ class UITests(unittest.TestCase):
         self.assertIs(window.page_stack.currentWidget(), window.chat_page)
         window.close()
 
+    def test_settings_expose_default_web_search_switch(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.open_settings()
+        self.app.processEvents()
+
+        page = window.settings_page
+        self.assertEqual(page.web_search.text(), "默认开启联网搜索")
+        self.assertTrue(page.web_search.isChecked())
+        window.close()
+
+    def test_message_meta_marks_web_search(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        self.assertEqual(
+            window._message_meta("deepseek-flash", "high", False, True),
+            "DeepSeek V4.1 Flash · 标准模式 · 联网搜索",
+        )
+        self.assertEqual(
+            window._message_meta("deepseek-flash", "max", True, True),
+            "DeepSeek V4.1 Flash · 深度思考 Max · 联网搜索",
+        )
+        window.close()
+
     def test_chat_harness_selector_switches_surfaces_and_keeps_runtime_warm(self) -> None:
         selector = ProductModeSelector()
         self.assertEqual(selector.mode(), "chat")
@@ -839,7 +890,7 @@ class UITests(unittest.TestCase):
         )
         window.close()
 
-    def test_harness_warm_start_defers_the_webengine_surface(self) -> None:
+    def test_harness_warm_start_defers_the_webengine_surface_until_quiet(self) -> None:
         cfg = dict(DEFAULTS)
         cfg["models"] = list(DEFAULTS["models"])
         cfg["api_key"] = "test"
@@ -853,6 +904,7 @@ class UITests(unittest.TestCase):
         with (
             patch.object(page.runtime, "start") as runtime_start,
             patch.object(page.surface, "show_web", lambda value: shown.append(value)),
+            patch.object(page, "_window_inactive", return_value=True),
         ):
             page.warm()
             runtime_start.assert_called_once()
@@ -871,6 +923,86 @@ class UITests(unittest.TestCase):
 
             page.start()
             self.assertEqual(shown, [url, url])
+        window.close()
+
+    def test_harness_warm_start_keeps_chat_stable_until_harness_is_opened(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        page = window.harness_page
+        url = "http://127.0.0.1:8123/ui?token=abc"
+        shown: list[str] = []
+        with (
+            patch.object(page.runtime, "start"),
+            patch.object(page.surface, "show_web", lambda value: shown.append(value)),
+            patch.object(page, "_window_inactive", return_value=False),
+        ):
+            page.warm()
+            page.runtime._ready = True
+            page.runtime._url = url
+            page._on_ready(url)
+            self.assertEqual(shown, [])
+            self.assertFalse(page._idle.is_pending())
+            self.assertEqual(page._pending_url, url)
+
+            page.start()
+            self.assertEqual(shown, [url])
+            self.assertIsNone(page._pending_url)
+        window.close()
+
+    def test_harness_surface_build_resumes_when_the_app_leaves_the_foreground(
+        self,
+    ) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        page = window.harness_page
+        url = "http://127.0.0.1:8123/ui?token=abc"
+        page._pending_url = url
+        with (
+            patch.object(page, "_window_inactive", return_value=True),
+            patch.object(page.surface, "show_web", lambda value: None),
+        ):
+            page._on_application_state_changed(
+                Qt.ApplicationState.ApplicationInactive
+            )
+            self.assertTrue(page._idle.is_pending())
+        window.close()
+
+    def test_harness_deferred_surface_skips_build_when_the_user_returns(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.show()
+        self.app.processEvents()
+
+        page = window.harness_page
+        url = "http://127.0.0.1:8123/ui?token=abc"
+        page._pending_url = url
+        with (
+            patch.object(page, "_window_inactive", return_value=False),
+            patch.object(page.surface, "show_web") as show_web,
+        ):
+            page._build_deferred_surface()
+            show_web.assert_not_called()
+            self.assertEqual(page._pending_url, url)
+
+        with (
+            patch.object(page, "_window_inactive", return_value=True),
+            patch.object(page.surface, "show_web") as show_web,
+        ):
+            page._build_deferred_surface()
+            show_web.assert_called_once_with(url)
+            self.assertIsNone(page._pending_url)
         window.close()
 
     def test_harness_warm_start_is_armed_by_the_first_visible_event(self) -> None:
@@ -1533,6 +1665,31 @@ class UITests(unittest.TestCase):
                     self.assertGreaterEqual(ink, 200)
         window.close()
 
+    def test_settings_icon_uses_six_tooth_vector_outline(self) -> None:
+        outline = _cog_path()
+        self.assertEqual(outline.elementCount(), 25)
+        self.assertFalse(
+            any(
+                outline.elementAt(index).isCurveTo()
+                for index in range(outline.elementCount())
+            )
+        )
+        points = {
+            (
+                round(outline.elementAt(index).x, 6),
+                round(outline.elementAt(index).y, 6),
+            )
+            for index in range(24)
+        }
+        turn_cosine = 0.5
+        turn_sine = sqrt(3.0) / 2.0
+        for x, y in points:
+            rotated = (
+                round(12.0 + (x - 12.0) * turn_cosine - (y - 12.0) * turn_sine, 6),
+                round(12.0 + (x - 12.0) * turn_sine + (y - 12.0) * turn_cosine, 6),
+            )
+            self.assertIn(rotated, points)
+
     def test_light_settings_entries_use_pure_black_ink(self) -> None:
         self.assertEqual(colors("light")["entry_fg"], "#000000")
 
@@ -1542,12 +1699,12 @@ class UITests(unittest.TestCase):
         self.assertEqual(image.pixelColor(center, center).alpha(), 0)
         self.assertGreater(image.pixelColor(center + 5, center).alpha(), 120)
         for dx, dy in (
-            (17, 10),
-            (0, 20),
-            (-17, 10),
-            (17, -10),
-            (0, -20),
-            (-17, -10),
+            (16, 9),
+            (0, 18),
+            (-16, 9),
+            (16, -9),
+            (0, -18),
+            (-16, -9),
         ):
             self.assertGreater(
                 image.pixelColor(center + dx, center + dy).alpha(),

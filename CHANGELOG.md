@@ -41,11 +41,3 @@
 | Windows | — | 待适配 |
 
 当前 v1.0.0 安装包为 Apple Silicon macOS 版本，使用本地 ad-hoc 签名，尚未接入 Apple Developer ID 签名和 notarization。首次打开时 macOS 可能显示“无法验证开发者”，或显示“Apple 无法检查‘DeepSeek’是否包含恶意软件”，并阻止应用启动。请确认 DMG 来自本项目的 GitHub Releases，先尝试打开一次，再到“系统设置 → 隐私与安全性”向下滚动到“安全性”区域，在对应提示旁点击“仍要打开”（英文系统为 `Open Anyway`），按提示确认即可。详见 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。Windows 安装包位置已预留，后续适配完成后再添加，不上传空文件或占位安装包。
-
-## v0.1.0 — 2026-09-09
-
-首个 Apple Silicon macOS 安装版，提供基础的 DeepSeek API 对话能力：
-
-- 支持流式输出、深度思考、图片输入、Markdown、代码块、表格和离线 KaTeX 数学公式。
-- 支持本地对话历史、浅色/深色主题、自定义系统提示词和自动生成历史标题。
-- 提供 `DeepSeek-Chat-0.1.0-macos-arm64.dmg` 成品安装包。

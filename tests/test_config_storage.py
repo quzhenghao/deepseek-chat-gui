@@ -17,6 +17,11 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(cleaned["system_prompt"], "始终使用简体中文。")
 
+    def test_web_search_is_enabled_by_default(self) -> None:
+        self.assertTrue(config.DEFAULTS["web_search"])
+        cleaned = config._sanitize({**config.DEFAULTS, "web_search": False})
+        self.assertFalse(cleaned["web_search"])
+
     def test_legacy_model_names_are_migrated(self) -> None:
         cleaned = config._sanitize(
             {
