@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
-import sys
-import time
 import weakref
 
 from PySide6.QtCore import (
@@ -231,111 +227,6 @@ class FrameAnimator(QObject):
             self.finished.emit()
             return
         self.valueChanged.emit(value)
-
-
-class SystemIdleClock:
-    """Best-effort "seconds since the user last touched this machine".
-
-    The desktop app schedules one expensive warm-up (building the WebEngine
-    surface) and wants to run it while the user is not interacting.  Activity
-    cannot be observed with a Python event filter on QApplication: PySide
-    crashes when Chromium delivers events for its own unregistered types, and
-    filters installed on individual widgets never see events sent straight to
-    a child.  The platform idle clock answers the question directly instead.
-    """
-
-    def __init__(self) -> None:
-        self._probe = None
-        if sys.platform != "darwin":
-            return
-        try:
-            library = ctypes.CDLL(ctypes.util.find_library("CoreGraphics"))
-            probe = library.CGEventSourceSecondsSinceLastEventType
-            probe.restype = ctypes.c_double
-            probe.argtypes = [ctypes.c_int32, ctypes.c_uint32]
-        except (OSError, AttributeError, TypeError):
-            return
-        self._probe = probe
-
-    def seconds_since_input(self) -> float | None:
-        if self._probe is None:
-            return None
-        try:
-            value = float(self._probe(0, 0xFFFFFFFF))
-        except Exception:
-            return None
-        if value != value or value < 0:
-            return None
-        return value
-
-
-class IdleDispatcher(QObject):
-    """Run one heavy callback once the machine has been quiet for a moment.
-
-    Creating the embedded WebEngine surface blocks the GUI thread for a few
-    hundred milliseconds.  Waiting for an idle gap keeps that cost away from
-    the user's keystrokes and clicks; ``deadline_ms`` guarantees the work still
-    happens when the machine never goes quiet.
-    """
-
-    def __init__(
-        self,
-        *,
-        idle_ms: int = 700,
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self._idle_ms = max(0, int(idle_ms))
-        self._clock = SystemIdleClock()
-        self._callback = None
-        self._not_before = 0.0
-        self._deadline = 0.0
-        self._timer = QTimer(self)
-        self._timer.setInterval(120)
-        self._timer.timeout.connect(self._maybe_run)
-
-    def schedule(
-        self,
-        callback,
-        *,
-        delay_ms: int = 0,
-        deadline_ms: int = 6000,
-    ) -> None:
-        now = time.monotonic()
-        self._callback = callback
-        self._not_before = now + max(0, delay_ms) / 1000.0
-        self._deadline = now + max(0, deadline_ms) / 1000.0 if deadline_ms else 0.0
-        if not self._timer.isActive():
-            self._timer.start()
-
-    def cancel(self) -> None:
-        self._callback = None
-        self._timer.stop()
-
-    def is_pending(self) -> bool:
-        return self._callback is not None
-
-    def seconds_since_input(self) -> float | None:
-        return self._clock.seconds_since_input()
-
-    def _maybe_run(self) -> None:
-        callback = self._callback
-        if callback is None:
-            self._timer.stop()
-            return
-        now = time.monotonic()
-        if now < self._not_before:
-            return
-        since_input = self.seconds_since_input()
-        quiet = (
-            since_input is None
-            or since_input >= self._idle_ms / 1000.0
-        )
-        if not quiet and not (self._deadline and now >= self._deadline):
-            return
-        self._callback = None
-        self._timer.stop()
-        callback()
 
 
 class RoundedComboBox(QComboBox):

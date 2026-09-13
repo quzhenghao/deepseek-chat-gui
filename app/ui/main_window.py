@@ -831,6 +831,7 @@ class MainWindow(QMainWindow):
         self.harness_page.surface.mode_selector.set_mode(normalized)
         if normalized == self._mode:
             if normalized == "harness":
+                self.page_stack.setCurrentWidget(self.harness_page)
                 self.harness_page.start()
             return
         self._mode = normalized

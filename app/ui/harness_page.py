@@ -7,12 +7,12 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -26,7 +26,6 @@ from ..harness import (
     harness_home,
 )
 from .icons import tint_pixmap
-from .controls import IdleDispatcher
 from .sidebar import ProductModeSelector
 from .theme import colors
 
@@ -323,10 +322,7 @@ class HarnessPage(QWidget):
         self.setObjectName("harnessPage")
         self._cfg = dict(cfg)
         self._theme = theme
-        self._started_once = False
-        self._defer_surface = False
-        self._pending_url: str | None = None
-        self._idle = IdleDispatcher(idle_ms=600, parent=self)
+        self._surface_pending = False
         self.surface = HarnessSurface(theme, self)
         self.surface.modeRequested.connect(self.modeRequested.emit)
         self.surface.retryRequested.connect(self.start)
@@ -334,9 +330,6 @@ class HarnessPage(QWidget):
         self.runtime.stateChanged.connect(self._on_state)
         self.runtime.ready.connect(self._on_ready)
         self.runtime.failed.connect(self._on_failed)
-        app = QApplication.instance()
-        if app is not None:
-            app.applicationStateChanged.connect(self._on_application_state_changed)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.addWidget(self.surface)
@@ -353,21 +346,20 @@ class HarnessPage(QWidget):
         if self.runtime.is_running and any(
             previous.get(key) != self._cfg.get(key) for key in runtime_inputs
         ):
-            self._idle.cancel()
-            self._pending_url = None
-            self._defer_surface = False
+            self._surface_pending = False
             self.runtime.stop()
-            self.surface.show_status("Harness 配置已更新，下次进入时会重新启动。")
+            if self.isVisible():
+                self.surface.show_status("Harness 配置已更新，下次进入时会重新启动。")
 
     def start(self, silent: bool = False) -> None:
         """Start the runtime for a user-visible visit and reveal the surface."""
 
-        self._started_once = True
-        self._defer_surface = False
-        self._idle.cancel()
-        self._pending_url = None
+        self._surface_pending = False
         if self.runtime.is_ready:
-            self.surface.show_web(self.runtime.url)
+            if self.isVisible() and not self.window().isMinimized():
+                self.surface.show_web(self.runtime.url)
+            else:
+                self._surface_pending = True
             return
         if not silent:
             self.surface.show_status("正在准备官方Harness(首次启动会下载运行包)......")
@@ -378,19 +370,8 @@ class HarnessPage(QWidget):
         self.runtime.start(working_directory)
 
     def warm(self) -> None:
-        """Keep the runtime warm without disturbing the visible Chat surface.
+        """Start only the Harness service; leave WebEngine for an explicit visit."""
 
-        Starting ``dsh web`` is the slow part, so it launches immediately.
-        Creating the WebEngine surface can make macOS recomposite the whole
-        window, which reads as a flicker while Chat is on screen.  The surface
-        is therefore only built once the app is in the background or the user
-        explicitly opens Harness; both paths are covered by :meth:`_on_ready`
-        and :meth:`start`.
-        """
-
-        self._started_once = True
-        self._defer_surface = True
-        self._pending_url = None
         self.runtime.start(self._working_directory())
 
     def _working_directory(self) -> Path:
@@ -404,73 +385,46 @@ class HarnessPage(QWidget):
         return Path.home()
 
     def _on_state(self, text: str) -> None:
-        if self._defer_surface and not self.isVisible():
-            return
-        self.surface.show_status(text)
+        if self.isVisible():
+            self.surface.show_status(text)
 
     def _on_ready(self, url: str) -> None:
-        self._pending_url = url
-        if self.isVisible():
-            self._idle.cancel()
-            self.surface.show_web(url)
+        stack = self.parentWidget()
+        if isinstance(stack, QStackedWidget):
+            if stack.currentWidget() is not self:
+                return
+        elif not self.isVisible():
             return
-        self._maybe_schedule_surface_build()
-
-    def _maybe_schedule_surface_build(self) -> None:
-        """Build the WebEngine surface only when it cannot flash the window."""
-
-        if self._pending_url is None or self._idle.is_pending():
+        if not self.isVisible() or self.window().isMinimized():
+            self._surface_pending = True
             return
-        if self.isVisible() or not self._window_inactive():
-            return
-        self._idle.schedule(
-            self._build_deferred_surface,
-            delay_ms=150,
-            deadline_ms=6000,
-        )
-
-    def _build_deferred_surface(self) -> None:
-        """Create the warmed surface from a genuinely quiet background moment."""
-
-        url = self._pending_url
-        if url is None:
-            return
-        if not self.isVisible() and not self._window_inactive():
-            # The user came back before the idle gap closed.  Keep the runtime
-            # warm and let the next explicit visit build the surface.
-            return
-        self._pending_url = None
+        self._surface_pending = False
         self.surface.show_web(url)
 
-    def _window_inactive(self) -> bool:
-        window = self.window()
-        if window is None:
-            return True
-        app = QApplication.instance()
-        if app is not None:
-            return app.applicationState() != Qt.ApplicationState.ApplicationActive
-        return not window.isActiveWindow()
-
-    def _on_application_state_changed(self, state) -> None:
-        if state != Qt.ApplicationState.ApplicationActive:
-            self._maybe_schedule_surface_build()
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if (
+            self._surface_pending
+            and self.runtime.is_ready
+            and not self.window().isMinimized()
+        ):
+            self._surface_pending = False
+            self.surface.show_web(self.runtime.url)
 
     def _on_failed(self, message: str) -> None:
-        self._idle.cancel()
-        self._pending_url = None
-        self.surface.show_status(message, failed=True)
-        self.surface.set_detail(
-            "可查看官方文档，确认Node.js22.19+/24+、网络和API密钥后再次启动"
-        )
+        self._surface_pending = False
+        if self.isVisible():
+            self.surface.show_status(message, failed=True)
+            self.surface.set_detail(
+                "可查看官方文档，确认Node.js22.19+/24+、网络和API密钥后再次启动"
+            )
 
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         self.surface.apply_theme(theme)
 
     def stop(self) -> None:
-        self._defer_surface = False
-        self._pending_url = None
-        self._idle.cancel()
+        self._surface_pending = False
         self.runtime.stop()
         self.surface.dispose()
 
