@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QElapsedTimer,
     QEvent,
     QObject,
+    QPoint,
     QPointF,
     QRectF,
     QSize,
@@ -265,6 +266,51 @@ _MATH_WEB_SHELL = r"""<!doctype html>
         applyReveal();
       };
 
+      const caretAt = (x, y) => {
+        const px = Math.max(0, Math.min(window.innerWidth - 1, x));
+        const py = Math.max(0, Math.min(window.innerHeight - 1, y));
+        if (document.caretPositionFromPoint) {
+          const caret = document.caretPositionFromPoint(px, py);
+          if (caret) return { node: caret.offsetNode, offset: caret.offset };
+        }
+        const range = document.caretRangeFromPoint(px, py);
+        return range
+          ? { node: range.startContainer, offset: range.startOffset }
+          : null;
+      };
+
+      let dragAnchor = null;
+      document.addEventListener("mousedown", (event) => {
+        if (event.button !== 0 || (
+          event.target instanceof Element && event.target.closest(".code-copy")
+        )) return;
+        dragAnchor = caretAt(event.clientX, event.clientY);
+        if (!dragAnchor || !root.contains(dragAnchor.node)) return;
+        if (bridge) bridge.startSelectionDrag(event.clientX, event.clientY);
+      });
+      document.addEventListener("mousemove", (event) => {
+        if (dragAnchor && (event.buttons & 1) && bridge) {
+          bridge.moveSelectionDrag(event.clientX, event.clientY);
+        }
+      });
+      const finishSelectionDrag = () => {
+        if (!dragAnchor) return;
+        dragAnchor = null;
+        if (bridge) bridge.finishSelectionDrag();
+      };
+      window.addEventListener("mouseup", finishSelectionDrag);
+      window.addEventListener("blur", finishSelectionDrag);
+
+      window.autoScrollSelection = (delta, x, y) => {
+        if (!dragAnchor) return;
+        if (internalScroll && delta) window.scrollBy(0, delta);
+        const caret = caretAt(x, y);
+        if (!caret || !root.contains(caret.node)) return;
+        window.getSelection().setBaseAndExtent(
+          dragAnchor.node, dragAnchor.offset, caret.node, caret.offset
+        );
+      };
+
       document.addEventListener("click", (event) => {
         const button = event.target instanceof Element
           ? event.target.closest(".code-copy")
@@ -349,6 +395,9 @@ class _MathBridge(QObject):
     heightReported = Signal(int)
     verticalScrollRequested = Signal(float)
     copyRequested = Signal(str)
+    selectionDragStarted = Signal(float, float)
+    selectionDragMoved = Signal(float, float)
+    selectionDragFinished = Signal()
 
     @Slot(float)
     def reportHeight(self, height: float) -> None:
@@ -361,6 +410,18 @@ class _MathBridge(QObject):
     @Slot(str)
     def copyText(self, text: str) -> None:
         self.copyRequested.emit(text)
+
+    @Slot(float, float)
+    def startSelectionDrag(self, x: float, y: float) -> None:
+        self.selectionDragStarted.emit(x, y)
+
+    @Slot(float, float)
+    def moveSelectionDrag(self, x: float, y: float) -> None:
+        self.selectionDragMoved.emit(x, y)
+
+    @Slot()
+    def finishSelectionDrag(self) -> None:
+        self.selectionDragFinished.emit()
 
 
 class _MathWebView(QWebEngineView):
@@ -410,6 +471,9 @@ class _MathWebView(QWebEngineView):
         self._bridge.verticalScrollRequested.connect(self._forward_vertical_scroll)
         self._copy_to_clipboard = lambda text: QApplication.clipboard().setText(text)
         self._bridge.copyRequested.connect(self._copy_to_clipboard)
+        self._bridge.selectionDragStarted.connect(self._start_selection_drag)
+        self._bridge.selectionDragMoved.connect(self._move_selection_drag)
+        self._bridge.selectionDragFinished.connect(self._finish_selection_drag)
         self._channel = QWebChannel(page)
         self._channel.registerObject("mathBridge", self._bridge)
         page.setWebChannel(self._channel)
@@ -533,6 +597,33 @@ class _MathWebView(QWebEngineView):
         scroll_bar = ancestor.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.value() + round(delta))
 
+    def _start_selection_drag(self, x: float, y: float) -> None:
+        chat = _chat_view_for(self)
+        if chat is not None:
+            chat._start_selection_drag(
+                self, self.mapToGlobal(QPoint(round(x), round(y)))
+            )
+
+    def _move_selection_drag(self, x: float, y: float) -> None:
+        chat = _chat_view_for(self)
+        if chat is not None:
+            chat._move_selection_drag(
+                self, self.mapToGlobal(QPoint(round(x), round(y)))
+            )
+
+    def _finish_selection_drag(self) -> None:
+        chat = _chat_view_for(self)
+        if chat is not None:
+            chat._stop_selection_drag(self)
+
+    def _extend_selection_drag(self, delta: int, global_pos: QPoint) -> None:
+        if self._disposed or self.page() is None:
+            return
+        point = self.mapFromGlobal(global_pos)
+        self.page().runJavaScript(
+            f"window.autoScrollSelection({delta}, {point.x()}, {point.y()})"
+        )
+
     def focusOutEvent(self, event) -> None:
         if event.reason() == Qt.FocusReason.MouseFocusReason:
             self.clear_selection()
@@ -595,6 +686,7 @@ class _MathWebView(QWebEngineView):
 
         if self._disposed:
             return
+        self._finish_selection_drag()
         self._disposed = True
         self._ready = False
         self._generation += 1
@@ -607,6 +699,9 @@ class _MathWebView(QWebEngineView):
             (self._bridge.heightReported, self._apply_content_height),
             (self._bridge.verticalScrollRequested, self._forward_vertical_scroll),
             (self._bridge.copyRequested, self._copy_to_clipboard),
+            (self._bridge.selectionDragStarted, self._start_selection_drag),
+            (self._bridge.selectionDragMoved, self._move_selection_drag),
+            (self._bridge.selectionDragFinished, self._finish_selection_drag),
         ):
             try:
                 signal.disconnect(slot)
@@ -622,6 +717,13 @@ class _MathWebView(QWebEngineView):
         self.deleteLater()
 
 
+def _chat_view_for(widget: QWidget) -> ChatView | None:
+    ancestor = widget.parentWidget()
+    while ancestor is not None and not isinstance(ancestor, ChatView):
+        ancestor = ancestor.parentWidget()
+    return ancestor
+
+
 class MessageTextBrowser(QTextBrowser):
     """Read-only message text whose right-click menu stays a flat panel."""
 
@@ -629,6 +731,36 @@ class MessageTextBrowser(QTextBrowser):
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.IBeamCursor)
         self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+
+    def mousePressEvent(self, event) -> None:
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            chat = _chat_view_for(self)
+            if chat is not None:
+                chat._start_selection_drag(self, event.globalPosition().toPoint())
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            chat = _chat_view_for(self)
+            if chat is not None:
+                chat._move_selection_drag(self, event.globalPosition().toPoint())
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            chat = _chat_view_for(self)
+            if chat is not None:
+                chat._stop_selection_drag(self)
+
+    def _extend_selection_drag(self, global_pos: QPoint) -> None:
+        cursor = self.textCursor()
+        point = self.viewport().mapFromGlobal(global_pos)
+        point.setX(max(0, min(self.viewport().width() - 1, point.x())))
+        target = self.cursorForPosition(point)
+        if target.position() != cursor.position():
+            cursor.setPosition(target.position(), QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cursor)
 
     def focusOutEvent(self, event) -> None:
         if event.reason() == Qt.FocusReason.MouseFocusReason:
@@ -2053,6 +2185,12 @@ class ChatView(QScrollArea):
         self._scroll_timer.setSingleShot(True)
         self._scroll_timer.timeout.connect(self._scroll_to_bottom_if_following)
         self._scroll_timer.setInterval(0)
+        self._selection_drag_source: MessageTextBrowser | _MathWebView | None = None
+        self._selection_drag_pos = QPoint()
+        self._selection_drag_moved = False
+        self._selection_scroll_timer = QTimer(self)
+        self._selection_scroll_timer.setInterval(30)
+        self._selection_scroll_timer.timeout.connect(self._scroll_during_selection)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2073,6 +2211,7 @@ class ChatView(QScrollArea):
         self.apply_theme("light")
 
     def clear(self) -> None:
+        self._stop_selection_drag()
         self._scroll_timer.stop()
         for bubble in self._bubbles:
             self.messages.removeWidget(bubble)
@@ -2146,6 +2285,9 @@ class ChatView(QScrollArea):
 
     def remove_bubble(self, bubble: MessageBubble) -> None:
         if bubble in self._bubbles:
+            source = self._selection_drag_source
+            if source is not None and (source is bubble or bubble.isAncestorOf(source)):
+                self._stop_selection_drag()
             self._bubbles.remove(bubble)
             self.messages.removeWidget(bubble)
             bubble.dispose()
@@ -2265,6 +2407,66 @@ class ChatView(QScrollArea):
         focused = QApplication.focusWidget()
         if isinstance(focused, (MessageTextBrowser, _MathWebView)):
             focused.clear_selection()
+
+    def _start_selection_drag(
+        self, source: MessageTextBrowser | _MathWebView, global_pos: QPoint
+    ) -> None:
+        self._selection_drag_source = source
+        self._selection_drag_pos = global_pos
+        self._selection_drag_moved = False
+        self._selection_scroll_timer.start()
+
+    def _move_selection_drag(
+        self, source: MessageTextBrowser | _MathWebView, global_pos: QPoint
+    ) -> None:
+        if source is not self._selection_drag_source:
+            return
+        if global_pos != self._selection_drag_pos:
+            self._selection_drag_moved = True
+            self._selection_drag_pos = global_pos
+
+    def _stop_selection_drag(
+        self, source: MessageTextBrowser | _MathWebView | None = None
+    ) -> None:
+        if source is not None and source is not self._selection_drag_source:
+            return
+        self._selection_scroll_timer.stop()
+        self._selection_drag_source = None
+        self._selection_drag_moved = False
+
+    def _scroll_during_selection(self) -> None:
+        source = self._selection_drag_source
+        if source is None or not (
+            QApplication.mouseButtons() & Qt.MouseButton.LeftButton
+        ):
+            self._stop_selection_drag()
+            return
+        if not self._selection_drag_moved:
+            return
+
+        point = self.viewport().mapFromGlobal(self._selection_drag_pos)
+        edge = 36
+        if point.y() < edge:
+            direction = -1
+            distance = edge - point.y()
+        elif point.y() > self.viewport().height() - edge:
+            direction = 1
+            distance = point.y() - (self.viewport().height() - edge)
+        else:
+            return
+
+        step = direction * min(80, max(5, round(distance * 1.2)))
+        bar = self.verticalScrollBar()
+        before = bar.value()
+        self.pause_follow()
+        bar.setValue(before + step)
+        if isinstance(source, MessageTextBrowser):
+            source._extend_selection_drag(self._selection_drag_pos)
+        elif isinstance(source, _MathWebView):
+            top = source.mapTo(self.viewport(), QPoint()).y()
+            visible = top < self.viewport().height() and top + source.height() > 0
+            inside = step if visible and bar.value() == before else 0
+            source._extend_selection_drag(inside, self._selection_drag_pos)
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y() or event.pixelDelta().y()

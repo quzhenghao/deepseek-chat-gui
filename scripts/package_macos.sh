@@ -17,9 +17,11 @@ PY
 ARCH="$(uname -m)"
 
 SPEC_FILE="$ROOT_DIR/DeepSeekChat.spec"
-DIST_APP="$ROOT_DIR/dist/${APP_NAME}.app"
-RELEASE_DIR="$ROOT_DIR/release"
-STAGE_DIR="$ROOT_DIR/build/dmg-stage"
+BUILD_DIR="${DEEPSEEK_BUILD_DIR:-$ROOT_DIR/build}"
+DIST_DIR="${DEEPSEEK_DIST_DIR:-$ROOT_DIR/dist}"
+RELEASE_DIR="${DEEPSEEK_RELEASE_DIR:-$ROOT_DIR/release}"
+DIST_APP="$DIST_DIR/${APP_NAME}.app"
+STAGE_DIR="$BUILD_DIR/dmg-stage"
 DMG_NAME="DeepSeek-${VERSION}-macos-${ARCH}.dmg"
 DMG_PATH="$RELEASE_DIR/$DMG_NAME"
 
@@ -29,7 +31,8 @@ if [ "${DEEPSEEK_SKIP_HARNESS_BUNDLE:-0}" != "1" ]; then
 else
   echo ">> Skipping bundled Harness runtime (DEEPSEEK_SKIP_HARNESS_BUNDLE=1)"
 fi
-"$PYTHON_BIN" -m PyInstaller --clean --noconfirm "$SPEC_FILE"
+"$PYTHON_BIN" -m PyInstaller --clean --noconfirm \
+  --workpath "$BUILD_DIR" --distpath "$DIST_DIR" "$SPEC_FILE"
 
 # PyInstaller 6.22 can relocate the extra QtWebEngineCore framework
 # resources into ``Versions/Resources``.  That layout leaves the framework's
