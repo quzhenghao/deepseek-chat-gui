@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from .. import ASSETS_DIR
 from .controls import build_flat_menu
 from .icons import apply_icon, tint_pixmap
+from .message_bubbles import ThinkingIndicator
 from .theme import (
     BRAND_BADGE_SIZE,
     BRAND_MARK_SIZE,
@@ -198,6 +199,7 @@ class ConversationItem(QWidget):
         batch_mode: bool,
         checked: bool,
         theme: str,
+        running: bool = False,
     ) -> None:
         super().__init__()
         self.conversation_id = conversation["id"]
@@ -229,6 +231,11 @@ class ConversationItem(QWidget):
         text_layout.addWidget(self.time)
         layout.addLayout(text_layout, 1)
 
+        self.running_indicator = ThinkingIndicator(theme)
+        self.running_indicator.setToolTip("正在生成回答")
+        layout.addWidget(self.running_indicator)
+        self.set_running(running)
+
         self.more_button = QToolButton()
         self.more_button.setFixedSize(28, 28)
         self.more_button.setToolTip("更多操作")
@@ -239,6 +246,13 @@ class ConversationItem(QWidget):
 
     def set_checked(self, checked: bool) -> None:
         self.checkbox.setChecked(checked)
+
+    def set_running(self, running: bool) -> None:
+        self.running_indicator.setVisible(running)
+        if running:
+            self.running_indicator.start()
+        else:
+            self.running_indicator.stop()
 
     def _show_menu(self) -> None:
         menu = build_flat_menu(self)
@@ -275,6 +289,7 @@ class ConversationItem(QWidget):
         self.time.setStyleSheet(
             f"color:{palette['fg_muted']};background:transparent;font-size:11px;"
         )
+        self.running_indicator.set_theme(theme)
         apply_icon(self.more_button, "more", palette["fg_sub"], 18)
 
 
@@ -471,9 +486,16 @@ class Sidebar(QWidget):
     def is_collapsed(self) -> bool:
         return self._collapsed
 
-    def refresh(self, conversations: list[dict], current_id: str | None) -> None:
+    def refresh(
+        self,
+        conversations: list[dict],
+        current_id: str | None,
+        running_ids: set[str] | None = None,
+    ) -> None:
         self._current_id = current_id
         self.conversation_list.blockSignals(True)
+        for widget in self._items.values():
+            widget.running_indicator.stop()
         self.conversation_list.clear()
         self._items.clear()
         self._list_items.clear()
@@ -491,6 +513,7 @@ class Sidebar(QWidget):
                 self._batch_mode,
                 self._checked.get(conversation_id, False),
                 self._theme,
+                conversation_id in (running_ids or set()),
             )
             widget.selected.connect(self._select_id)
             widget.renameRequested.connect(self.renameConversation.emit)

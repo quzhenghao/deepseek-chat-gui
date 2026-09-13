@@ -324,9 +324,9 @@ class InputPanel(QWidget):
         self._thinking_available = enabled
         if not enabled:
             self.thinking_button.setChecked(False)
-        self.thinking_button.setEnabled(enabled and not self._generating)
+        self.thinking_button.setEnabled(enabled)
         self.effort_combo.setEnabled(
-            enabled and not self._generating and self.is_thinking()
+            enabled and self.is_thinking()
         )
         self.thinking_button.setToolTip(
             "深度思考" if enabled else "当前模型不支持深度思考"
@@ -339,20 +339,13 @@ class InputPanel(QWidget):
 
     def set_vision(self, enabled: bool) -> None:
         self._vision = enabled
-        self.attach_button.setEnabled(not self._generating)
+        self.attach_button.setEnabled(True)
         self.attach_button.setToolTip(
             "添加图片" if enabled else "当前模型不支持图片"
         )
 
     def set_generating(self, generating: bool) -> None:
         self._generating = generating
-        self.editor.setReadOnly(generating)
-        self.attach_button.setEnabled(not generating)
-        self.thinking_button.setEnabled(self._thinking_available and not generating)
-        self.search_button.setEnabled(not generating)
-        self.effort_combo.setEnabled(
-            self._thinking_available and not generating and self.is_thinking()
-        )
         self.action_button.setObjectName("stopBtn" if generating else "actionBtn")
         self.action_button.style().unpolish(self.action_button)
         self.action_button.style().polish(self.action_button)
@@ -360,7 +353,7 @@ class InputPanel(QWidget):
 
     def _thinking_toggled(self, enabled: bool) -> None:
         self.effort_combo.setEnabled(
-            enabled and self._thinking_available and not self._generating
+            enabled and self._thinking_available
         )
         self.thinkingChanged.emit(enabled)
         self.apply_theme(self._theme)
@@ -410,20 +403,20 @@ class InputPanel(QWidget):
         ]
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if self._vision and self._image_urls(event) and not self._generating:
+        if self._vision and self._image_urls(event):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if self._vision and self._image_urls(event) and not self._generating:
+        if self._vision and self._image_urls(event):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
         paths = self._image_urls(event)
-        if self._vision and paths and not self._generating:
+        if self._vision and paths:
             event.acceptProposedAction()
             self.filesDropped.emit(paths)
         else:
@@ -589,14 +582,23 @@ class ChatWorkspace(QWidget):
 @dataclass
 class StreamContext:
     conversation_id: str
-    bubble: AssistantBubble
+    bubble: AssistantBubble | None
     model: str
     effort: str
     thinking: bool
     web_search: bool = False
     content: str = ""
     reasoning: str = ""
+    status: str = ""
     stopped: bool = False
+    worker: ChatWorker | None = None
+
+
+@dataclass
+class DraftState:
+    text: str
+    images: list[str]
+    cursor_position: int
 
 
 class MainWindow(QMainWindow):
@@ -607,8 +609,9 @@ class MainWindow(QMainWindow):
         self._app = app
         self._theme = cfg.get("theme", "light")
         self._current_conversation_id: str | None = None
-        self._context: StreamContext | None = None
-        self._worker: ChatWorker | None = None
+        self._streams: dict[str, StreamContext] = {}
+        self._workers: set[ChatWorker] = set()
+        self._drafts: dict[str | None, DraftState] = {}
         self._title_workers: set[TitleWorker] = set()
         self._title_worker_by_conversation: dict[str, TitleWorker] = {}
         self._notice_dialog: NoticeDialog | None = None
@@ -976,22 +979,59 @@ class MainWindow(QMainWindow):
 
     def refresh_sidebar(self, selected: str | None = None) -> None:
         current = selected if selected is not None else self._current_conversation_id
-        self.sidebar.refresh(self.store.conversations(), current)
+        self.sidebar.refresh(
+            self.store.conversations(), current, set(self._streams)
+        )
+
+    def _save_draft(self) -> None:
+        key = self._current_conversation_id
+        draft = DraftState(
+            self.chat_input.toPlainText(),
+            self.input_panel.image_strip.paths(),
+            self.chat_input.textCursor().position(),
+        )
+        if draft.text or draft.images:
+            self._drafts[key] = draft
+        else:
+            self._drafts.pop(key, None)
+
+    def _restore_draft(self, conversation_id: str | None) -> None:
+        draft = self._drafts.get(conversation_id)
+        self.chat_input.setPlainText(draft.text if draft else "")
+        cursor = self.chat_input.textCursor()
+        cursor.setPosition(min(draft.cursor_position, len(draft.text)) if draft else 0)
+        self.chat_input.setTextCursor(cursor)
+        self.input_panel.image_strip.clear()
+        if draft:
+            self.input_panel.image_strip.add_paths(
+                [path for path in draft.images if Path(path).is_file()]
+            )
+
+    def _detach_visible_stream(self) -> None:
+        context = self._streams.get(self._current_conversation_id or "")
+        if context is not None:
+            context.bubble = None
 
     def on_new_chat(self) -> None:
-        self._stop_current()
+        self._save_draft()
+        self._detach_visible_stream()
         self._current_conversation_id = None
         self.chat_view.clear()
-        self.chat_input.clear()
-        self.input_panel.image_strip.clear()
+        self._drafts.pop(None, None)
+        self._restore_draft(None)
+        self._sync_generating()
         self.show_welcome()
 
     def on_select_conversation(self, conversation_id: str) -> None:
-        if self._context and self._context.conversation_id != conversation_id:
-            self.on_stop()
         conversation = self.store.get(conversation_id)
         if conversation is None:
             return
+        if self._current_conversation_id == conversation_id:
+            self.sidebar.set_current(conversation_id)
+            self.chat_input.setFocus()
+            return
+        self._save_draft()
+        self._detach_visible_stream()
         self._current_conversation_id = conversation_id
         self.chat_workspace.set_page(self.chat_view)
         self.chat_view.clear()
@@ -1017,8 +1057,30 @@ class MainWindow(QMainWindow):
                     thinking=thinking,
                     stopped=bool(message.get("stopped", False)),
                 )
-            elif role == "system" and not message.get("hidden", False):
+            elif role == "error" or (
+                role == "system" and not message.get("hidden", False)
+            ):
                 self.chat_view.add_error(message.get("content", "请求失败"))
+        context = self._streams.get(conversation_id)
+        if context is not None:
+            bubble = self.chat_view.add_streaming(
+                self._message_meta(
+                    context.model,
+                    context.effort,
+                    context.thinking,
+                    context.web_search,
+                ),
+                context.thinking,
+            )
+            context.bubble = bubble
+            if context.reasoning:
+                bubble.set_reasoning(context.reasoning)
+            if context.content:
+                bubble.set_content(context.content)
+            if context.status:
+                bubble.set_status(context.status)
+        self._restore_draft(conversation_id)
+        self._sync_generating()
         self.sidebar.set_current(conversation_id)
         self.chat_view.scroll_to_bottom(force=True)
         self.chat_input.setFocus()
@@ -1052,13 +1114,15 @@ class MainWindow(QMainWindow):
         )
         if not confirmed:
             return
-        if self._context and self._context.conversation_id == conversation_id:
-            self.on_stop()
+        self._cancel_stream(conversation_id)
         self._cancel_title_summary(conversation_id)
         self.store.delete(conversation_id)
+        self._drafts.pop(conversation_id, None)
         if self._current_conversation_id == conversation_id:
             self._current_conversation_id = None
             self.chat_view.clear()
+            self._restore_draft(None)
+            self._sync_generating()
             self.show_welcome()
         self.refresh_sidebar()
 
@@ -1076,14 +1140,16 @@ class MainWindow(QMainWindow):
         )
         if not confirmed:
             return
-        if self._context and self._context.conversation_id in conversation_ids:
-            self.on_stop()
         for conversation_id in conversation_ids:
+            self._cancel_stream(conversation_id)
             self._cancel_title_summary(conversation_id)
+            self._drafts.pop(conversation_id, None)
         self.store.delete_many(conversation_ids)
         if self._current_conversation_id in conversation_ids:
             self._current_conversation_id = None
             self.chat_view.clear()
+            self._restore_draft(None)
+            self._sync_generating()
             self.show_welcome()
         self.refresh_sidebar()
 
@@ -1170,7 +1236,7 @@ class MainWindow(QMainWindow):
         return conversation
 
     def on_send(self) -> None:
-        if self._context is not None:
+        if self._current_conversation_id in self._streams:
             return
         text = self.chat_input.toPlainText().strip()
         staged_images = self.input_panel.image_strip.paths()
@@ -1184,6 +1250,7 @@ class MainWindow(QMainWindow):
             self._show_notice("当前模型不支持已添加的图片")
             return
 
+        previous_id = self._current_conversation_id
         conversation = self._ensure_conversation("新对话")
         conversation_id = conversation["id"]
         stored_images: list[str] = []
@@ -1226,6 +1293,8 @@ class MainWindow(QMainWindow):
         self.chat_view.add_user(text, stored_images)
         self.input_panel.image_strip.clear()
         self.chat_input.clear()
+        self._drafts.pop(previous_id, None)
+        self._drafts.pop(conversation_id, None)
         self.refresh_sidebar(conversation_id)
         self._start_request(conversation_id, model, effort, thinking, web_search)
 
@@ -1259,12 +1328,16 @@ class MainWindow(QMainWindow):
         try:
             messages = payload_messages(conversation.get("messages", []))
         except Exception as exc:
-            self.chat_view.add_error(f"无法读取图片：{exc}")
+            message = f"无法读取图片：{exc}"
+            self.store.append_message(
+                conversation_id, {"role": "error", "content": message}
+            )
+            self.chat_view.add_error(message)
             return
         bubble = self.chat_view.add_streaming(
             self._message_meta(model, effort, thinking, web_search), thinking
         )
-        self._context = StreamContext(
+        context = StreamContext(
             conversation_id,
             bubble,
             model,
@@ -1282,44 +1355,67 @@ class MainWindow(QMainWindow):
             int(self.cfg.get("max_tokens", 0)),
             web_search,
         )
-        self._worker = worker
-        worker.chunk.connect(self._on_chunk)
-        worker.reasoning.connect(self._on_reasoning)
-        worker.status.connect(self._on_status)
-        worker.done.connect(self._on_done)
-        worker.failed.connect(self._on_failed)
+        context.worker = worker
+        self._streams[conversation_id] = context
+        self._workers.add(worker)
+        worker.chunk.connect(
+            lambda text, active=context: self._on_chunk(active, text)
+        )
+        worker.reasoning.connect(
+            lambda text, active=context: self._on_reasoning(active, text)
+        )
+        worker.status.connect(
+            lambda text, active=context: self._on_status(active, text)
+        )
+        worker.done.connect(lambda active=context: self._on_done(active))
+        worker.failed.connect(
+            lambda message, active=context: self._on_failed(active, message)
+        )
         worker.finished.connect(lambda: self._clear_worker(worker))
-        self._set_generating(True)
+        self._sync_generating()
+        self.refresh_sidebar()
         worker.start()
 
-    def _set_generating(self, generating: bool) -> None:
-        self.model_combo.setEnabled(not generating)
-        self.input_panel.set_generating(generating)
+    def _sync_generating(self) -> None:
+        self.input_panel.set_generating(
+            self._current_conversation_id in self._streams
+        )
 
-    def _on_chunk(self, text: str) -> None:
-        context = self._context
-        if context is None:
+    def _visible_bubble(self, context: StreamContext) -> AssistantBubble | None:
+        if (
+            self._streams.get(context.conversation_id) is not context
+            or self._current_conversation_id != context.conversation_id
+            or context.bubble is None
+            or not isValid(context.bubble)
+        ):
+            return None
+        return context.bubble
+
+    def _on_chunk(self, context: StreamContext, text: str) -> None:
+        if self._streams.get(context.conversation_id) is not context:
             return
         context.content += text
-        if isValid(context.bubble):
-            context.bubble.set_content(context.content)
-            self.chat_view.message_updated(context.bubble)
+        bubble = self._visible_bubble(context)
+        if bubble is not None:
+            bubble.set_content(context.content)
+            self.chat_view.message_updated(bubble)
 
-    def _on_reasoning(self, text: str) -> None:
-        context = self._context
-        if context is None:
+    def _on_reasoning(self, context: StreamContext, text: str) -> None:
+        if self._streams.get(context.conversation_id) is not context:
             return
         context.reasoning += text
-        if isValid(context.bubble):
-            context.bubble.set_reasoning(context.reasoning)
-            self.chat_view.message_updated(context.bubble)
+        bubble = self._visible_bubble(context)
+        if bubble is not None:
+            bubble.set_reasoning(context.reasoning)
+            self.chat_view.message_updated(bubble)
 
-    def _on_status(self, text: str) -> None:
-        context = self._context
-        if context is None:
+    def _on_status(self, context: StreamContext, text: str) -> None:
+        if self._streams.get(context.conversation_id) is not context:
             return
-        if isValid(context.bubble):
-            context.bubble.set_status(text)
+        context.status = text
+        bubble = self._visible_bubble(context)
+        if bubble is not None:
+            bubble.set_status(text)
 
     def _assistant_record(self, context: StreamContext) -> dict:
         return {
@@ -1334,56 +1430,71 @@ class MainWindow(QMainWindow):
             "stopped": context.stopped,
         }
 
-    def _on_done(self) -> None:
-        context = self._context
-        if context is None:
+    def _on_done(self, context: StreamContext) -> None:
+        if self._streams.get(context.conversation_id) is not context:
             return
-        self._context = None
-        self._set_generating(False)
+        self._streams.pop(context.conversation_id, None)
         self.store.append_message(
             context.conversation_id, self._assistant_record(context)
         )
-        if isValid(context.bubble):
+        if (
+            self._current_conversation_id == context.conversation_id
+            and context.bubble is not None
+            and isValid(context.bubble)
+        ):
             context.bubble.finish(context.stopped)
             self.chat_view.message_updated(context.bubble)
+            if self.page_stack.currentWidget() is self.chat_page:
+                self.chat_input.setFocus()
+        self._sync_generating()
         self.refresh_sidebar()
         self._start_title_summary(context.conversation_id, context.model)
-        self.chat_input.setFocus()
 
-    def _on_failed(self, message: str) -> None:
-        context = self._context
-        if context is None:
+    def _on_failed(self, context: StreamContext, message: str) -> None:
+        if self._streams.get(context.conversation_id) is not context:
             return
-        self._context = None
-        self._set_generating(False)
+        self._streams.pop(context.conversation_id, None)
+        visible = (
+            self._current_conversation_id == context.conversation_id
+            and context.bubble is not None
+            and isValid(context.bubble)
+        )
         if context.content or context.reasoning:
             context.stopped = True
             self.store.append_message(
                 context.conversation_id, self._assistant_record(context)
             )
-            if isValid(context.bubble):
+            if visible:
                 context.bubble.fail(f"生成中断：{message}")
                 self.chat_view.message_updated(context.bubble)
             self._start_title_summary(context.conversation_id, context.model)
         else:
-            if isValid(context.bubble):
+            self.store.append_message(
+                context.conversation_id,
+                {"role": "error", "content": message},
+            )
+            if visible:
                 self.chat_view.remove_bubble(context.bubble)
                 self.chat_view.add_error(message)
+        self._sync_generating()
         self.refresh_sidebar()
 
     def on_stop(self) -> None:
-        if self._context is None:
+        context = self._streams.get(self._current_conversation_id or "")
+        if context is None:
             return
-        self._context.stopped = True
-        if self._worker:
-            self._worker.cancel()
+        context.stopped = True
+        if context.worker is not None:
+            context.worker.cancel()
 
-    def _stop_current(self) -> None:
-        self.on_stop()
+    def _cancel_stream(self, conversation_id: str) -> None:
+        context = self._streams.pop(conversation_id, None)
+        if context is not None and context.worker is not None:
+            context.worker.cancel()
+        self._sync_generating()
 
     def _clear_worker(self, worker: ChatWorker) -> None:
-        if self._worker is worker:
-            self._worker = None
+        self._workers.discard(worker)
         worker.deleteLater()
 
     def _start_title_summary(self, conversation_id: str, model: str) -> None:
@@ -1515,13 +1626,15 @@ class MainWindow(QMainWindow):
         if self._notice_dialog is not None and isValid(self._notice_dialog):
             self._notice_dialog.close()
         self._hover_tips.hide()
-        if self._worker:
-            self._worker.cancel()
-            if not self._worker.wait(12000):
-                self._worker.terminate()
-                self._worker.wait(1000)
-        self._context = None
-        self._worker = None
+        workers = list(self._workers)
+        for worker in workers:
+            worker.cancel()
+        for worker in workers:
+            if not worker.wait(12000):
+                worker.terminate()
+                worker.wait(1000)
+        self._streams.clear()
+        self._workers.clear()
         title_workers = list(self._title_workers)
         for worker in title_workers:
             worker.cancel()
