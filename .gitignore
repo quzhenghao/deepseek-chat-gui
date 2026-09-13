@@ -13,17 +13,8 @@ release/
 *.log
 vendor/harness/
 
-# Keep the public repository limited to the runnable client and runtime assets.
-README.md
-CHANGELOG.md
-update.md
+# Keep generated and development-only files out of the public repository.
 联网搜索与思考折叠栏技术实现详解.md
-DeepSeekChat.spec
-requirements-dev.txt
-scripts/
 tests/
-assets/screenshots/
-assets/app-icon.icns
 assets/app-icon.svg
 assets/vendor/katex/README.md
-assets/vendor/katex/LICENSE
