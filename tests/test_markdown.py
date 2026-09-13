@@ -143,6 +143,21 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn("#242424", rendered)
         self.assertNotRegex(rendered, re.compile(r"data:image|<img|<canvas", re.I))
 
+    def test_renders_markdown_tables(self) -> None:
+        rendered = to_html("| 名称 | 数值 |\n| --- | ---: |\n| A | 1 |\n| B | 2 |")
+        self.assertIn("<table>", rendered)
+        self.assertIn("<th>名称</th>", rendered)
+        self.assertIn("<td>A</td>", rendered)
+        self.assertIn('<td style="text-align:right">1</td>', rendered)
+        self.assertIn("border-collapse:collapse", rendered)
+
+    def test_renders_citation_links_from_search_sources(self) -> None:
+        rendered = to_html(
+            "答案引用 [1]。\n\n1. [官方说明](https://example.com/a)"
+        )
+        self.assertIn("[1]", rendered)
+        self.assertIn('<a href="https://example.com/a">官方说明</a>', rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

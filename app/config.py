@@ -18,15 +18,18 @@ DATA_PATH = APP_DIR / "conversations.json"
 MEDIA_DIR = APP_DIR / "media"
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-MODEL_CATALOG_VERSION = 3
+MODEL_CATALOG_VERSION = 4
 MAX_OUTPUT_TOKENS = 256_000
 
 V41_FLASH_MODEL = "deepseek-flash"
-DEFAULT_MODELS = [V41_FLASH_MODEL]
-MODEL_LABELS = {V41_FLASH_MODEL: "DeepSeek V4.1 Flash"}
+V4_PRO_MODEL = "deepseek-v4-pro"
+DEFAULT_MODELS = [V41_FLASH_MODEL, V4_PRO_MODEL]
+MODEL_LABELS = {
+    V41_FLASH_MODEL: "DeepSeek V4.1 Flash",
+    V4_PRO_MODEL: "DeepSeek V4 Pro",
+}
 
 REMOVED_OFFICIAL_MODELS = {
-    "deepseek-v4-pro",
     "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
 }
@@ -42,12 +45,21 @@ _COMPACT_LEGACY_MODEL_ALIASES = {
     re.sub(r"\s+", "-", key): target
     for key, target in LEGACY_MODEL_ALIASES.items()
 }
+_COMPACT_MODEL_LABEL_ALIASES = {
+    re.sub(r"\s+", "-", label.lower()): model
+    for model, label in MODEL_LABELS.items()
+}
 EFFORT_LEVELS = ["low", "high", "max"]
 EFFORT_LABELS = {"low": "Low", "high": "High", "max": "Max"}
 
 MODEL_CAPABILITIES = {
     V41_FLASH_MODEL: {
         "vision": True,
+        "thinking": True,
+        "efforts": tuple(EFFORT_LEVELS),
+    },
+    V4_PRO_MODEL: {
+        "vision": False,
         "thinking": True,
         "efforts": tuple(EFFORT_LEVELS),
     },
@@ -64,6 +76,9 @@ DEFAULTS: dict[str, Any] = {
     "last_effort": "high",
     "deep_thinking": True,
     "web_search": True,
+    "search_provider": "duckduckgo",
+    "search_api_key": "",
+    "search_max_results": 5,
     "temperature": 1.0,
     "max_tokens": 0,
     "theme": "light",
@@ -113,10 +128,10 @@ def normalize_official_models(models: Any) -> list[str]:
     """Normalize a live official model response for the app's built-in catalog.
 
     The endpoint is authoritative for availability, while the client owns the
-    user-facing aliases/capabilities.  We retain the current Flash route and
-    silently omit explicitly retired routes.  Unknown future IDs are kept as
-    manual choices so an account can still use a newly published route before
-    a client release updates its capability metadata.
+    user-facing aliases/capabilities.  We retain the current Flash and Pro
+    routes and silently omit explicitly retired routes.  Unknown future IDs
+    are kept as manual choices so an account can still use a newly published
+    route before a client release updates its capability metadata.
     """
 
     if isinstance(models, str):
@@ -139,6 +154,8 @@ def _normalize_model(model: Any) -> str:
     compacted = re.sub(r"\s+", "-", lowered)
     if compacted in _COMPACT_LEGACY_MODEL_ALIASES:
         return _COMPACT_LEGACY_MODEL_ALIASES[compacted]
+    if compacted in _COMPACT_MODEL_LABEL_ALIASES:
+        return _COMPACT_MODEL_LABEL_ALIASES[compacted]
     if compacted in REMOVED_OFFICIAL_MODELS:
         return ""
     return value
@@ -168,6 +185,17 @@ def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["last_effort"] = _normalize_effort(cfg.get("last_effort"))
     cfg["deep_thinking"] = bool(cfg.get("deep_thinking", True))
     cfg["web_search"] = bool(cfg.get("web_search", True))
+    search_provider = str(cfg.get("search_provider") or "duckduckgo").strip().lower()
+    cfg["search_provider"] = (
+        search_provider if search_provider in {"duckduckgo", "tavily"} else "duckduckgo"
+    )
+    cfg["search_api_key"] = str(cfg.get("search_api_key") or "").strip()
+    try:
+        cfg["search_max_results"] = min(
+            10, max(1, int(cfg.get("search_max_results", 5)))
+        )
+    except (TypeError, ValueError):
+        cfg["search_max_results"] = 5
 
     base_url = str(cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
     if base_url == "https://api.deepseek.com/v1":
@@ -220,7 +248,14 @@ def load_config() -> dict[str, Any]:
                     saved_catalog_version < MODEL_CATALOG_VERSION
                     and uses_official_api(cfg.get("base_url"))
                 ):
-                    cfg["models"] = normalize_official_models(cfg.get("models"))
+                    # Keep a user's saved choices, but add newly supported
+                    # built-in official routes during a catalog migration.
+                    saved_models = cfg.get("models") or []
+                    if isinstance(saved_models, str):
+                        saved_models = saved_models.splitlines()
+                    cfg["models"] = normalize_official_models(
+                        [*saved_models, *DEFAULT_MODELS]
+                    )
         except (OSError, json.JSONDecodeError):
             pass
     return _sanitize(cfg)

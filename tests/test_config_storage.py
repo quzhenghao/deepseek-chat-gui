@@ -22,6 +22,22 @@ class ConfigTests(unittest.TestCase):
         cleaned = config._sanitize({**config.DEFAULTS, "web_search": False})
         self.assertFalse(cleaned["web_search"])
 
+    def test_search_provider_settings_are_sanitized(self) -> None:
+        self.assertEqual(config.DEFAULTS["search_provider"], "duckduckgo")
+        cleaned = config._sanitize(
+            {
+                **config.DEFAULTS,
+                "search_provider": "tavily",
+                "search_api_key": " tvly-test ",
+                "search_max_results": 99,
+            }
+        )
+        self.assertEqual(cleaned["search_provider"], "tavily")
+        self.assertEqual(cleaned["search_api_key"], "tvly-test")
+        self.assertEqual(cleaned["search_max_results"], 10)
+        unknown = config._sanitize({**config.DEFAULTS, "search_provider": "bing"})
+        self.assertEqual(unknown["search_provider"], "duckduckgo")
+
     def test_legacy_model_names_are_migrated(self) -> None:
         cleaned = config._sanitize(
             {
@@ -31,15 +47,15 @@ class ConfigTests(unittest.TestCase):
                 "last_effort": "Medium",
             }
         )
-        self.assertEqual(cleaned["models"], ["deepseek-flash"])
-        self.assertEqual(cleaned["default_model"], "deepseek-flash")
+        self.assertEqual(cleaned["models"], ["deepseek-flash", "deepseek-v4-pro"])
+        self.assertEqual(cleaned["default_model"], "deepseek-v4-pro")
         self.assertEqual(cleaned["last_effort"], "high")
 
     def test_official_legacy_base_url_is_normalized(self) -> None:
         cleaned = config._sanitize({**config.DEFAULTS, "base_url": "https://api.deepseek.com/v1"})
         self.assertEqual(cleaned["base_url"], "https://api.deepseek.com")
 
-    def test_existing_official_config_migrates_to_current_flash_model(self) -> None:
+    def test_existing_official_config_migrates_to_current_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.json"
@@ -55,13 +71,30 @@ class ConfigTests(unittest.TestCase):
                 loaded = config.load_config()
         self.assertEqual(
             loaded["models"],
-            ["deepseek-flash"],
+            ["deepseek-flash", "deepseek-v4-pro"],
         )
         self.assertEqual(
             loaded["model_catalog_version"], config.MODEL_CATALOG_VERSION
         )
 
-    def test_current_catalog_replaces_a_retired_model(self) -> None:
+    def test_existing_official_string_model_config_adds_new_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            config_path.write_text(
+                '{"models":"deepseek-flash",'
+                '"base_url":"https://api.deepseek.com",'
+                '"model_catalog_version":3}',
+                encoding="utf-8",
+            )
+            with (
+                patch("app.config.APP_DIR", root),
+                patch("app.config.CONFIG_PATH", config_path),
+            ):
+                loaded = config.load_config()
+        self.assertEqual(loaded["models"], ["deepseek-flash", "deepseek-v4-pro"])
+
+    def test_current_catalog_keeps_the_supported_pro_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.json"
@@ -78,17 +111,17 @@ class ConfigTests(unittest.TestCase):
                 patch("app.config.CONFIG_PATH", config_path),
             ):
                 loaded = config.load_config()
-        self.assertEqual(loaded["models"], ["deepseek-flash"])
+        self.assertEqual(loaded["models"], ["deepseek-v4-pro"])
 
-    def test_official_model_catalog_resolves_to_current_flash(self) -> None:
+    def test_official_model_catalog_resolves_current_routes(self) -> None:
         merged = config.normalize_official_models(
             ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-flash"]
         )
-        self.assertEqual(merged, ["deepseek-flash"])
+        self.assertEqual(merged, ["deepseek-flash", "deepseek-v4-pro"])
         self.assertTrue(config.uses_official_api("https://api.deepseek.com/v1"))
         self.assertFalse(config.uses_official_api("https://example.com/v1"))
 
-    def test_harness_defaults_are_created_once_and_use_current_flash_model(self) -> None:
+    def test_harness_defaults_are_created_once_and_use_current_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "harness"
             cfg = {**config.DEFAULTS, "base_url": "https://api.deepseek.com"}
@@ -102,7 +135,8 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("thinking: enabled", first)
             self.assertIn("reasoningEffort: high", first)
             self.assertIn("inputModalities: [text, image]", first)
-            self.assertNotIn("deepseek-v4-pro", first)
+            self.assertIn("id: deepseek-v4-pro", first)
+            self.assertIn("inputModalities: [text]", first)
 
 
 class StorageTests(unittest.TestCase):

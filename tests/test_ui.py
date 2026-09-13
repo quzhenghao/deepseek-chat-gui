@@ -15,9 +15,10 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt
-from PySide6.QtGui import QHelpEvent, QPalette, QTextCursor
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, QUrl, Qt
+from PySide6.QtGui import QHelpEvent, QImage, QPalette, QTextCursor
 from PySide6.QtTest import QTest
+from PySide6.QtWebEngineCore import QWebEngineProfile
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -34,6 +35,7 @@ from app.config import (
     EFFORT_LABELS,
     EFFORT_LEVELS,
     MODEL_CAPABILITIES,
+    V4_PRO_MODEL,
     V41_FLASH_MODEL,
     effort_label,
     is_vision_model,
@@ -56,18 +58,25 @@ from app.ui.controls import (
 )
 from app.ui.icons import _cog_path, icon
 from app.ui.harness_page import HarnessSurface
+from app.ui.image_strip import ImageStrip, THUMBNAIL_RADIUS
 from app.ui.main_window import ChatTextEdit, MainWindow
 from app.ui.message_bubbles import (
+    IMAGE_GRID_COLUMNS,
+    IMAGE_THUMB_SIZE,
     WEB_SURFACE_MAX_HEIGHT,
     WEB_SURFACE_TEXTURE_LIMIT,
     ChatView,
     MessageTextBrowser,
+    OpenImageLabel,
+    ThinkingPreview,
     ThinkingIndicator,
     _MathWebView,
     _MATH_WEB_SHELL,
+    _extract_complete_sentences,
 )
 from app.ui.sidebar import ProductModeSelector
 from app.ui.theme import (
+    CHAT_BUBBLE_RADIUS,
     RAIL_SIDEBAR_WIDTH,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MIN_WIDTH,
@@ -171,11 +180,180 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(bubble.reasoning_panel.indicator._timer.isActive())
         self.assertFalse(bubble.reasoning_panel.reasoning_view.isVisible())
+        running_indicator_left = bubble.reasoning_panel.indicator.geometry().left()
+        running_toggle_left = bubble.reasoning_panel.toggle.geometry().left()
         bubble.set_content("最终答案")
         bubble.finish()
         self.app.processEvents()
         self.assertFalse(bubble.reasoning_panel.indicator._timer.isActive())
         self.assertTrue(bubble.content_view.isVisible())
+        self.assertTrue(bubble.reasoning_panel.preview.isVisible())
+        self.assertEqual(
+            bubble.reasoning_panel.indicator.geometry().left(),
+            running_indicator_left,
+        )
+        self.assertEqual(
+            bubble.reasoning_panel.toggle.geometry().left(),
+            running_toggle_left,
+        )
+        view.close()
+
+    def test_streaming_answer_body_reveals_from_top_to_bottom(self) -> None:
+        view = ChatView()
+        view.resize(900, 600)
+        view.show()
+        bubble = view.add_streaming("模型 · 标准模式", False)
+        content = "第一行正文内容。\n\n" + "第二行正文内容。" * 12
+        bubble.set_content(content)
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: bubble._typing_timer.isActive(),
+                timeout_ms=3000,
+            )
+        )
+        self.assertGreater(bubble._typing_visible_characters, 0)
+        self.assertLess(
+            bubble._typing_visible_characters,
+            len(content),
+        )
+
+        bubble.finish()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not bubble._typing_timer.isActive(),
+                timeout_ms=5000,
+            )
+        )
+        self.assertFalse(bubble._typing_enabled)
+        self.assertEqual(bubble._typing_visible_characters, len(content))
+        self.assertTrue(bubble.actions.isVisible())
+        view.close()
+
+    def test_reasoning_preview_fills_width_and_keeps_streaming_tail_at_60fps(self) -> None:
+        self.assertEqual(
+            _extract_complete_sentences("第一句。第二句！还没有结束"),
+            ["第一句。", "第二句！"],
+        )
+
+        preview = ThinkingPreview()
+        preview.resize(180, 20)
+        preview.set_reasoning("第一句。第二句！还没有结束")
+        self.assertEqual(
+            "".join(preview.sentences),
+            "第一句。第二句！还没有结束",
+        )
+        preview.start()
+        self.assertEqual(preview._timer.interval(), 16)
+        self.assertEqual(
+            preview._timer.timerType(),
+            Qt.TimerType.PreciseTimer,
+        )
+        self.assertIn("第一句。", preview.current_sentence)
+        self.assertEqual(preview.visible_text, "")
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: preview.visible_text == preview.current_sentence,
+                timeout_ms=700,
+            )
+        )
+        self.assertGreater(len(preview.visible_text), len("第一句。"))
+        self.assertTrue(any(len(segment) > len("第一句。") for segment in preview.sentences))
+        preview.stop()
+        self.assertFalse(preview._timer.isActive())
+        preview.deleteLater()
+
+    def test_reasoning_preview_windows_begin_at_sentence_boundaries(self) -> None:
+        preview = ThinkingPreview()
+        preview.resize(120, 20)
+        source = (
+            "第一句是一段足够长的思考内容，需要在右侧渐隐处理。"
+            "第二句同样从句首开始显示，避免从中间截断。"
+        )
+        preview.set_reasoning(source)
+
+        second_sentence_start = source.index("第二句")
+        self.assertEqual(
+            preview._segment_starts,
+            [0, second_sentence_start],
+        )
+        self.assertTrue(
+            all(
+                segment.startswith(expected)
+                for segment, expected in zip(
+                    preview.sentences,
+                    ("第一句", "第二句"),
+                )
+            )
+        )
+
+        preview.start()
+        preview._current_index = 1
+        preview._begin_cycle()
+        self.assertTrue(preview.current_sentence.startswith("第二句"))
+        preview.stop()
+        preview.deleteLater()
+
+    def test_web_search_status_replaces_thinking_label_in_reasoning_bar(self) -> None:
+        view = ChatView()
+        view.resize(900, 600)
+        view.show()
+        bubble = view.add_streaming(
+            "DeepSeek V4.1 Flash · 深度思考 High · 联网搜索", True
+        )
+        bubble.set_reasoning("先确定查询词")
+        self.app.processEvents()
+        self.assertEqual(bubble.reasoning_panel.toggle.text(), "正在深度思考")
+        self.assertFalse(bubble.status_row.isVisible())
+
+        bubble.set_status("正在联网搜索…")
+        self.app.processEvents()
+        self.assertEqual(bubble.reasoning_panel.toggle.text(), "正在联网搜索")
+        self.assertFalse(bubble.status_row.isVisible())
+
+        bubble.set_status("已获取 1 条结果，正在生成回答…")
+        self.app.processEvents()
+        self.assertEqual(bubble.reasoning_panel.toggle.text(), "正在深度思考")
+        self.assertFalse(bubble.status_row.isVisible())
+
+        # A model may emit a short tool-call preamble before the worker knows
+        # that it needs to search. The status transition must restart the
+        # reasoning indicator instead of leaving the panel in its completed
+        # state.
+        bubble.set_content("我先搜索一下")
+        bubble.set_status("正在联网搜索…")
+        self.app.processEvents()
+        self.assertEqual(bubble.reasoning_panel.toggle.text(), "正在联网搜索")
+        self.assertTrue(bubble.reasoning_panel.indicator._timer.isActive())
+
+        bubble.finish()
+        self.app.processEvents()
+        self.assertEqual(bubble.reasoning_panel.toggle.text(), "已完成深度思考")
+        view.close()
+
+    def test_standard_mode_exposes_web_search_status(self) -> None:
+        view = ChatView()
+        view.resize(900, 600)
+        view.show()
+        bubble = view.add_streaming("DeepSeek V4.1 Flash · 标准模式 · 联网搜索", False)
+        self.app.processEvents()
+        self.assertTrue(bubble.status_row.isVisible())
+        self.assertEqual(bubble.status_label.text(), "正在生成")
+
+        bubble.set_status("正在联网搜索…")
+        self.app.processEvents()
+        self.assertEqual(bubble.status_label.text(), "正在联网搜索")
+        self.assertTrue(bubble.status_indicator._timer.isActive())
+
+        bubble.set_status("已获取 2 条结果，正在生成回答…")
+        self.app.processEvents()
+        self.assertEqual(bubble.status_label.text(), "正在生成")
+
+        bubble.set_content("答案")
+        bubble.finish()
+        self.app.processEvents()
+        self.assertFalse(bubble.status_row.isVisible())
         view.close()
 
     def test_streaming_switches_to_math_only_after_delimiter_closes(self) -> None:
@@ -216,6 +394,70 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(long.card.width(), 680)
         view.close()
+
+    def test_image_thumbnails_are_square_three_column_and_single_click(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="deepseek-image-ui-") as directory:
+            paths: list[str] = []
+            for index, (width, height) in enumerate(
+                ((320, 120), (120, 320), (220, 220), (480, 160), (160, 480))
+            ):
+                image = QImage(width, height, QImage.Format.Format_RGB32)
+                image.fill(index + 1)
+                path = Path(directory) / f"image-{index}.png"
+                self.assertTrue(image.save(str(path)))
+                paths.append(str(path))
+
+            strip = ImageStrip()
+            strip.show()
+            self.app.processEvents()
+            self.assertEqual(strip.add_paths(paths[:2]), 2)
+            with patch("app.ui.image_strip.QDesktopServices.openUrl") as open_before:
+                QTest.mouseClick(
+                    strip._items[0],
+                    Qt.MouseButton.LeftButton,
+                    pos=strip._items[0].rect().center(),
+                )
+            open_before.assert_called_once_with(QUrl.fromLocalFile(paths[0]))
+
+            view = ChatView()
+            view.resize(900, 600)
+            view.show()
+            bubble = view.add_user("图片说明", paths)
+            self.app.processEvents()
+
+            labels = bubble.card.findChildren(OpenImageLabel)
+            self.assertEqual(len(labels), len(paths))
+            self.assertTrue(
+                all(label.size() == QSize(IMAGE_THUMB_SIZE, IMAGE_THUMB_SIZE) for label in labels)
+            )
+            self.assertEqual(THUMBNAIL_RADIUS, CHAT_BUBBLE_RADIUS)
+            self.assertTrue(all("border:none" in label.styleSheet() for label in labels))
+            thumbnail_image = labels[0].pixmap().toImage()
+            self.assertEqual(thumbnail_image.pixelColor(0, 0).alpha(), 0)
+            image_grid = bubble.card.layout().itemAt(0).layout()
+            self.assertIsNotNone(image_grid)
+            self.assertEqual(
+                [image_grid.getItemPosition(index)[:2] for index in range(image_grid.count())],
+                [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)],
+            )
+            self.assertEqual(image_grid.columnCount(), IMAGE_GRID_COLUMNS)
+            self.assertIs(bubble.card.layout().itemAt(1).widget(), bubble.text_view)
+
+            with patch("app.ui.message_bubbles.QDesktopServices.openUrl") as open_after:
+                QTest.mouseClick(
+                    labels[0],
+                    Qt.MouseButton.LeftButton,
+                    pos=labels[0].rect().center(),
+                )
+            open_after.assert_called_once_with(QUrl.fromLocalFile(paths[0]))
+
+            image_only = view.add_user("", paths[:1])
+            self.app.processEvents()
+            self.assertEqual(image_only.card.layout().count(), 1)
+            self.assertIsNone(image_only.card.layout().itemAt(0).widget())
+            self.assertEqual(image_only.card.layout().itemAt(0).layout().count(), 1)
+            view.close()
+            strip.close()
 
     def test_plain_assistant_content_does_not_create_a_web_renderer(self) -> None:
         view = ChatView()
@@ -613,6 +855,32 @@ class UITests(unittest.TestCase):
         )
         window.close()
 
+    def test_clearing_uploaded_images_restores_the_composer_height(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(920, 700)
+        window.show()
+        window.chat_workspace.set_page(window.chat_view)
+        self.app.processEvents()
+
+        original_height = window.input_panel.height()
+        self.assertFalse(window.input_panel.image_strip.isVisible())
+        window.input_panel.image_strip.add_path("/tmp/deepseek-composer-test.png")
+        self.assertTrue(
+            self.wait_for(lambda: window.input_panel.height() > original_height)
+        )
+
+        window.input_panel.image_strip.clear()
+        self.assertTrue(
+            self.wait_for(lambda: window.input_panel.height() == original_height)
+        )
+        window.chat_input.setPlainText("下一轮输入")
+        self.app.processEvents()
+        self.assertEqual(window.input_panel.height(), original_height)
+        window.close()
+
     def test_conversation_delete_uses_the_themed_confirmation(self) -> None:
         cfg = dict(DEFAULTS)
         cfg["models"] = list(DEFAULTS["models"])
@@ -748,6 +1016,12 @@ class UITests(unittest.TestCase):
         self.assertTrue(is_vision_model(V41_FLASH_MODEL))
         self.assertTrue(supports_thinking(V41_FLASH_MODEL))
 
+    def test_current_v4_pro_model_is_labeled_and_text_only(self) -> None:
+        self.assertIn(V4_PRO_MODEL, DEFAULTS["models"])
+        self.assertEqual(model_label(V4_PRO_MODEL), "DeepSeek V4 Pro")
+        self.assertFalse(is_vision_model(V4_PRO_MODEL))
+        self.assertTrue(supports_thinking(V4_PRO_MODEL))
+
     def test_main_controls_use_rounded_model_and_add_icon(self) -> None:
         cfg = dict(DEFAULTS)
         cfg["models"] = list(DEFAULTS["models"])
@@ -768,6 +1042,7 @@ class UITests(unittest.TestCase):
         )
         self.assertEqual(window.input_panel.attach_button.objectName(), "attachBtn")
         self.assertFalse(window.input_panel.attach_button.icon().isNull())
+        self.assertEqual(window.input_panel.attach_button.iconSize(), QSize(20, 20))
         window.close()
 
     def test_settings_uses_embedded_two_column_page(self) -> None:
@@ -809,6 +1084,11 @@ class UITests(unittest.TestCase):
         page = window.settings_page
         self.assertEqual(page.web_search.text(), "默认开启联网搜索")
         self.assertTrue(page.web_search.isChecked())
+        self.assertEqual(
+            [page.search_provider.itemData(i) for i in range(page.search_provider.count())],
+            ["duckduckgo", "tavily"],
+        )
+        self.assertEqual(page.search_provider.currentData(), "duckduckgo")
         window.close()
 
     def test_message_meta_marks_web_search(self) -> None:
@@ -1041,6 +1321,11 @@ class UITests(unittest.TestCase):
         ):
             surface = HarnessSurface("light")
             surface.show_web(url)
+            self.assertIsNotNone(surface._profile)
+            self.assertEqual(
+                surface._profile.persistentCookiesPolicy(),
+                QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies,
+            )
             surface.show_web(url)
             self.assertEqual(loads, [url])
 
@@ -1099,9 +1384,90 @@ class UITests(unittest.TestCase):
 
         self.assertIn("internalScroll", _MATH_WEB_SHELL)
         self.assertIn("if (!atEdge) return;", _MATH_WEB_SHELL)
-        self.assertIn("overflowY", _MATH_WEB_SHELL)
+        self.assertIn("overflow: hidden", _MATH_WEB_SHELL)
+        self.assertIn("bridge.scrollVertically", _MATH_WEB_SHELL)
         view.dispose()
         QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_long_inline_web_surface_keeps_the_answer_tail_scrollable(self) -> None:
+        view = ChatView()
+        view.resize(720, 600)
+        view.show()
+        content = (
+            "```python\n"
+            + ("print('long answer line')\n" * 360)
+            + "```\n\n"
+            + "回答尾部：这段内容必须可以完整显示。"
+        )
+
+        bubble = view.add_assistant(content, thinking=False)
+        web_view = bubble.content_view._web_view
+        self.assertIsNotNone(web_view)
+        self.assertTrue(
+            self.wait_for(
+                lambda: web_view.height() == web_view._surface_height_limit()
+                and web_view.height() > 22,
+                timeout_ms=5000,
+            )
+        )
+
+        metrics = json.loads(
+            self.javascript_value(
+                web_view.page(),
+                """
+                JSON.stringify({
+                  overflow: getComputedStyle(document.documentElement)
+                    .overflowY,
+                  innerHeight: window.innerHeight,
+                  scrollHeight: Math.max(
+                    document.documentElement.scrollHeight,
+                    document.body.scrollHeight
+                  ),
+                  maxScroll: Math.max(
+                    0,
+                    Math.max(
+                      document.documentElement.scrollHeight,
+                      document.body.scrollHeight
+                    ) - window.innerHeight
+                  )
+                })
+                """,
+            )
+        )
+        self.assertEqual(metrics["overflow"], "auto")
+        self.assertGreater(metrics["scrollHeight"], metrics["innerHeight"])
+        self.assertGreater(metrics["maxScroll"], 0)
+
+        tail_scroll = json.loads(
+            self.javascript_value(
+                web_view.page(),
+                """
+                (() => {
+                  window.scrollTo(0, document.documentElement.scrollHeight);
+                  return JSON.stringify({
+                    scrollY: window.scrollY,
+                    maxScroll: Math.max(
+                      0,
+                      Math.max(
+                        document.documentElement.scrollHeight,
+                        document.body.scrollHeight
+                      ) - window.innerHeight
+                    ),
+                    tail: document.body.innerText.slice(-20)
+                  });
+                })()
+                """,
+            )
+        )
+        self.assertGreater(tail_scroll["scrollY"], 0)
+        self.assertAlmostEqual(
+            tail_scroll["scrollY"],
+            tail_scroll["maxScroll"],
+            delta=2,
+        )
+        self.assertIn("回答尾部", tail_scroll["tail"])
+
+        view.close()
 
     def test_text_selection_uses_the_platform_palette(self) -> None:
         for theme in ("light", "dark"):
@@ -1368,6 +1734,15 @@ class UITests(unittest.TestCase):
         window.open_settings()
         self.app.processEvents()
         self.assertEqual(window.settings_page.sidebar.width(), SIDEBAR_DEFAULT_WIDTH)
+        chat_header = window.chat_page.findChild(QWidget, "chatHeader")
+        settings_header = window.settings_page.findChild(QWidget, "settingsHeader")
+        self.assertIsNotNone(chat_header)
+        self.assertIsNotNone(settings_header)
+        self.assertEqual(settings_header.height(), chat_header.height())
+        self.assertEqual(
+            settings_header.layout().contentsMargins(),
+            chat_header.layout().contentsMargins(),
+        )
         window.close()
 
     def test_sidebar_collapses_into_an_icon_rail_with_animation(self) -> None:
@@ -1689,6 +2064,24 @@ class UITests(unittest.TestCase):
                 round(12.0 + (x - 12.0) * turn_sine + (y - 12.0) * turn_cosine, 6),
             )
             self.assertIn(rotated, points)
+
+    def test_stop_icon_uses_a_larger_center_square(self) -> None:
+        image = icon("stop", "#000000", 24).pixmap(QSize(24, 24)).toImage()
+        points = [
+            (x, y)
+            for y in range(image.height())
+            for x in range(image.width())
+            if image.pixelColor(x, y).alpha() > 0
+        ]
+        self.assertEqual(
+            (
+                min(x for x, _ in points),
+                min(y for _, y in points),
+                max(x for x, _ in points),
+                max(y for _, y in points),
+            ),
+            (6, 6, 17, 17),
+        )
 
     def test_light_settings_entries_use_pure_black_ink(self) -> None:
         self.assertEqual(colors("light")["entry_fg"], "#000000")

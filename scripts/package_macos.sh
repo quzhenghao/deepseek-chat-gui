@@ -31,6 +31,28 @@ else
 fi
 "$PYTHON_BIN" -m PyInstaller --clean --noconfirm "$SPEC_FILE"
 
+# PyInstaller 6.22 can relocate the extra QtWebEngineCore framework
+# resources into ``Versions/Resources``.  That layout leaves the framework's
+# top-level Resources/Helpers links dangling and makes the app fail recursive
+# code-signature validation.  Restore the layout shipped by PySide6 before
+# staging the bundle, then sign the repaired bundle again.
+QT_WEBENGINE_FRAMEWORK="$DIST_APP/Contents/Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework"
+QT_WEBENGINE_EXTRA="$QT_WEBENGINE_FRAMEWORK/Versions/Resources"
+if [ -d "$QT_WEBENGINE_EXTRA" ]; then
+  echo ">> Restoring QtWebEngineCore framework resources"
+  cp -R "$QT_WEBENGINE_EXTRA/Resources/." \
+    "$QT_WEBENGINE_FRAMEWORK/Versions/A/Resources/"
+  mkdir -p "$QT_WEBENGINE_FRAMEWORK/Versions/A/Helpers"
+  cp -R "$QT_WEBENGINE_EXTRA/Helpers/." \
+    "$QT_WEBENGINE_FRAMEWORK/Versions/A/Helpers/"
+  rm -rf "$QT_WEBENGINE_EXTRA"
+  echo ">> Re-signing repaired app bundle"
+  codesign --force --sign - \
+    "$QT_WEBENGINE_FRAMEWORK/Versions/A/Helpers/QtWebEngineProcess.app"
+  codesign --force --sign - "$QT_WEBENGINE_FRAMEWORK"
+  codesign --deep --force --sign - "$DIST_APP"
+fi
+
 HARNESS_NODE="$DIST_APP/Contents/Resources/vendor/harness/node/bin/node"
 if [ -f "$HARNESS_NODE" ]; then
   chmod +x "$HARNESS_NODE"

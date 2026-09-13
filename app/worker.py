@@ -10,6 +10,7 @@ from . import api
 class ChatWorker(QThread):
     chunk = Signal(str)
     reasoning = Signal(str)
+    status = Signal(str)
     done = Signal()
     failed = Signal(str)
 
@@ -73,8 +74,12 @@ class ChatWorker(QThread):
             ):
                 if self._stop.is_set():
                     break
-                signal = self.reasoning if kind == "reasoning" else self.chunk
-                signal.emit(text)
+                if kind == "search":
+                    self.status.emit(text)
+                elif kind == "reasoning":
+                    self.reasoning.emit(text)
+                else:
+                    self.chunk.emit(text)
             self.done.emit()
         except api.APIError as exc:
             if self._stop.is_set():

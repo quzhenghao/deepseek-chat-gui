@@ -67,6 +67,18 @@ SIDEBAR_DEFAULT_WIDTH = 280
 SIDEBAR_MIN_WIDTH = 220
 RAIL_SIDEBAR_WIDTH = 56
 
+# Keep message surfaces and the image thumbnails inside them on the same
+# corner curve.  The value is in logical Qt pixels and is shared by the
+# custom thumbnail painter as well as the user-message QSS surface.
+CHAT_BUBBLE_RADIUS = 14
+
+# Keep the two right-hand product surfaces aligned when switching between
+# Chat and Settings.  The top bars intentionally share both their height and
+# horizontal padding so the content below them starts on the same rhythm.
+RIGHT_HEADER_HEIGHT = 58
+RIGHT_HEADER_MARGINS = (20, 8, 16, 8)
+RIGHT_HEADER_SPACING = 8
+
 BRAND_MARK_SIZE = 30
 BRAND_WORDMARK_SIZE = 20
 BRAND_BADGE_SIZE = 10
@@ -374,6 +386,11 @@ QToolButton#reasonToggle {{
     color: {c['fg_sub']};
     text-align: left;
     padding: 2px 4px;
+}}
+QWidget#reasoningPreview {{
+    color: {c['fg_muted']};
+    background: transparent;
+    font-size: 12px;
 }}
 QListWidget#convList {{
     background: transparent;

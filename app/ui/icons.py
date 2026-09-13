@@ -92,7 +92,7 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
     elif name == "stop":
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        painter.drawRoundedRect(QRectF(7, 7, 10, 10), 2, 2)
+        painter.drawRoundedRect(QRectF(6, 6, 12, 12), 2, 2)
     elif name == "add-square":
         painter.drawRoundedRect(QRectF(4.5, 4.5, 15, 15), 2, 2)
         painter.drawLine(QPointF(12, 8), QPointF(12, 16))

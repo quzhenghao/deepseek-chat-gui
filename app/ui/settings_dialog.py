@@ -55,6 +55,9 @@ from .theme import (
     BRAND_BADGE_SIZE,
     BRAND_MARK_SIZE,
     BRAND_WORDMARK_SIZE,
+    RIGHT_HEADER_HEIGHT,
+    RIGHT_HEADER_MARGINS,
+    RIGHT_HEADER_SPACING,
     SIDEBAR_DEFAULT_WIDTH,
     build_qss,
     colors,
@@ -151,10 +154,10 @@ class SettingsPage(QWidget):
 
         header = QWidget()
         header.setObjectName("settingsHeader")
-        header.setFixedHeight(72)
+        header.setFixedHeight(RIGHT_HEADER_HEIGHT)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(30, 10, 30, 10)
-        header_layout.setSpacing(10)
+        header_layout.setContentsMargins(*RIGHT_HEADER_MARGINS)
+        header_layout.setSpacing(RIGHT_HEADER_SPACING)
         heading = QVBoxLayout()
         heading.setSpacing(1)
         self.page_title = QLabel()
@@ -229,7 +232,7 @@ class SettingsPage(QWidget):
         scroll, sections = self._content_host()
 
         connection, connection_form = self._section(
-            "API 连接", "密钥只保存在当前电脑，不会写入项目源码。"
+            "API连接", "密钥只保存在当前电脑，不会写入项目源码。"
         )
         self.api_key = FlatLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -242,7 +245,7 @@ class SettingsPage(QWidget):
         self.test_button = QPushButton("测试连接")
         self.test_button.clicked.connect(self._test_connection)
         self.first_run_hint = QLabel(
-            "首次使用：填入 API 密钥 → 测试连接 → 保存设置，即可开始对话。"
+            "首次使用：填入API密钥 → 测试连接 → 保存设置，即可开始对话"
         )
         self.first_run_hint.setObjectName("onboardingHint")
         self.first_run_hint.setWordWrap(True)
@@ -252,11 +255,11 @@ class SettingsPage(QWidget):
         key_row.addWidget(self.api_key, 1)
         key_row.addWidget(self.show_key)
         key_row.addWidget(self.test_button)
-        connection_form.addRow("API 密钥", key_row)
+        connection_form.addRow("API密钥", key_row)
 
         self.base_url = FlatLineEdit()
         self.base_url.setPlaceholderText(DEFAULT_BASE_URL)
-        connection_form.addRow("API 地址", self.base_url)
+        connection_form.addRow("API地址", self.base_url)
         self.connection_status = QLabel("可先测试连接并同步账号可用模型")
         self.connection_status.setObjectName("hintLabel")
         self.connection_status.setWordWrap(True)
@@ -274,6 +277,16 @@ class SettingsPage(QWidget):
 
         self.web_search = QCheckBox("默认开启联网搜索")
         generation_form.addRow("联网搜索", self.web_search)
+
+        self.search_provider = RoundedComboBox(self._theme)
+        self.search_provider.addItem("DuckDuckGo(免费，无需密钥)", "duckduckgo")
+        self.search_provider.addItem("Tavily(更稳定，需API-Key)", "tavily")
+        generation_form.addRow("搜索服务商", self.search_provider)
+
+        self.search_api_key = FlatLineEdit()
+        self.search_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_api_key.setPlaceholderText("tvly-…")
+        generation_form.addRow("搜索API-Key", self.search_api_key)
 
         self.default_effort = RoundedComboBox(self._theme)
         for effort in EFFORT_LEVELS:
@@ -298,13 +311,13 @@ class SettingsPage(QWidget):
         sections.addWidget(appearance)
 
         models, models_form = self._section(
-            "模型列表", "每行一个 API 模型 ID；测试连接成功时会自动同步。"
+            "模型列表", "每行一个API模型ID；测试连接成功时会自动同步"
         )
         self.models_edit = FlatPlainTextEdit()
         self.models_edit.setPlaceholderText("deepseek-flash")
         self.models_edit.setFixedHeight(104)
         self.models_edit.textChanged.connect(self._models_changed)
-        models_form.addRow("模型 ID", self.models_edit)
+        models_form.addRow("模型ID", self.models_edit)
         sections.addWidget(models)
         sections.addStretch()
         return scroll
@@ -332,7 +345,7 @@ class SettingsPage(QWidget):
         self.system_prompt_edit = FlatPlainTextEdit()
         self.system_prompt_edit.setObjectName("systemPromptEdit")
         self.system_prompt_edit.setPlaceholderText(
-            "例如：你是一位严谨、耐心的助手。请始终使用简体中文回答，并在不确定时明确说明。"
+            "例如：你是一位严谨、耐心的助手。请始终使用简体中文回答，并在不确定时明确说明"
         )
         self.system_prompt_edit.setMinimumHeight(280)
         self.system_prompt_edit.textChanged.connect(self._update_prompt_count)
@@ -357,7 +370,7 @@ class SettingsPage(QWidget):
 
         runtime, runtime_form = self._section(
             "运行环境",
-            "查看客户端、Node.js 与官方 Harness 运行包状态。完整安装包会优先使用内置运行环境。",
+            "查看客户端、Node.js与官方Harness运行包状态。完整安装包会优先使用内置运行环境",
         )
         self.environment_status = QLabel()
         self.environment_status.setObjectName("environmentStatus")
@@ -375,7 +388,7 @@ class SettingsPage(QWidget):
         self.open_config_button = QPushButton("打开配置目录")
         self.open_config_button.clicked.connect(self._open_config_directory)
         runtime_actions.addWidget(self.open_config_button)
-        self.node_download_button = QPushButton("Node.js 更新入口")
+        self.node_download_button = QPushButton("Node.js更新入口")
         self.node_download_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(NODE_DOWNLOAD_URL))
         )
@@ -385,10 +398,10 @@ class SettingsPage(QWidget):
         sections.addWidget(runtime)
 
         harness, harness_form = self._section(
-            "Harness 预热与项目",
-            "Harness 是官方开发者预览版。启动 Chat 后会在后台提前准备，让首次切换更顺畅。",
+            "Harness预热与项目",
+            "Harness是官方开发者预览版。启动Chat后会在后台提前准备，让首次切换更顺畅。",
         )
-        self.harness_warm_start = QCheckBox("启动时预热 Harness（推荐）")
+        self.harness_warm_start = QCheckBox("启动时预热Harness(推荐)")
         harness_form.addRow("启动行为", self.harness_warm_start)
 
         self.harness_projects_edit = FlatPlainTextEdit()
@@ -422,11 +435,11 @@ class SettingsPage(QWidget):
 
         note, note_form = self._section(
             "安全提示",
-            "Harness 可能执行模型生成的命令或修改项目文件。请只授予必要的项目目录，并认真处理页面中的审批提示。",
+            "Harness可能执行模型生成的命令或修改项目文件。请只授予必要的项目目录，并认真处理页面中的审批提示",
         )
         note_label = QLabel(
             f"数据目录：{harness_home()}\n"
-            "API 密钥通过进程环境传递给 Harness，不会写入 Harness 配置文件。"
+            "API密钥通过进程环境传递给Harness，不会写入Harness配置文件。"
         )
         note_label.setObjectName("hintLabel")
         note_label.setWordWrap(True)
@@ -468,7 +481,7 @@ class SettingsPage(QWidget):
         if button is not None:
             button.setChecked(True)
         titles = (
-            ("基础配置", "管理 API、默认模型与界面外观"),
+            ("基础配置", "管理API、默认模型与界面外观"),
             ("个性化", "为每个新对话设置专属的系统提示词"),
             ("运行环境", "检查 Harness 依赖、项目目录与启动行为"),
         )
@@ -486,6 +499,11 @@ class SettingsPage(QWidget):
         self._fill_models(cfg.get("models", []), cfg.get("default_model", ""))
         self.deep_thinking.setChecked(bool(cfg.get("deep_thinking", True)))
         self.web_search.setChecked(bool(cfg.get("web_search", True)))
+        provider_index = self.search_provider.findData(
+            cfg.get("search_provider", "duckduckgo")
+        )
+        self.search_provider.setCurrentIndex(max(0, provider_index))
+        self.search_api_key.setText(str(cfg.get("search_api_key", "")))
         effort_index = self.default_effort.findData(cfg.get("default_effort", "high"))
         self.default_effort.setCurrentIndex(max(0, effort_index))
         self.max_tokens.setValue(int(cfg.get("max_tokens", 0)))
@@ -550,7 +568,7 @@ class SettingsPage(QWidget):
         api_key = self.api_key.text().strip()
         base_url = self.base_url.text().strip().rstrip("/")
         if not api_key or not base_url:
-            self._set_status("请先填写 API 密钥和地址", False)
+            self._set_status("请先填写API密钥和地址", False)
             return
         request = QNetworkRequest(QUrl(f"{base_url}/models"))
         request.setRawHeader(b"Authorization", f"Bearer {api_key}".encode())
@@ -559,8 +577,8 @@ class SettingsPage(QWidget):
         self._probe_timed_out = False
         self._probe_timer.start(15000)
         self.test_button.setEnabled(False)
-        self.test_button.setText("连接中…")
-        self._set_status("正在验证密钥并读取模型列表…", None)
+        self.test_button.setText("连接中...")
+        self._set_status("正在验证密钥并读取模型列表...", None)
 
     def _connection_finished(self) -> None:
         reply = self._reply
@@ -572,7 +590,7 @@ class SettingsPage(QWidget):
             return
         try:
             if self._probe_timed_out:
-                self._set_status("连接超时，请检查网络或 API 地址", False)
+                self._set_status("连接超时，请检查网络或API地址", False)
                 return
             payload = bytes(reply.readAll()).decode("utf-8", errors="replace")
             if reply.error() != QNetworkReply.NetworkError.NoError:
@@ -605,11 +623,11 @@ class SettingsPage(QWidget):
             self.models_edit.setPlainText("\n".join(models))
             if uses_official_api(self.base_url.text()):
                 self._set_status(
-                    f"连接成功，已同步 {len(models)} 个当前可用模型",
+                    f"连接成功，已同步{len(models)}个当前可用模型",
                     True,
                 )
             else:
-                self._set_status(f"连接成功，已同步 {len(models)} 个模型", True)
+                self._set_status(f"连接成功，已同步{len(models)}个模型", True)
         except (ValueError, TypeError):
             self._set_status("连接成功，但响应格式无法识别", False)
         finally:
@@ -642,7 +660,7 @@ class SettingsPage(QWidget):
     def _choose_harness_project(self) -> None:
         directory = QFileDialog.getExistingDirectory(
             self,
-            "选择 Harness 项目目录",
+            "选择Harness项目目录",
             str(Path.home()),
         )
         if not directory:
@@ -678,7 +696,7 @@ class SettingsPage(QWidget):
         harness_state = (
             f"已内置（{HARNESS_DISPLAY_VERSION}）"
             if bundled_harness_available()
-            else f"按需准备（{HARNESS_DISPLAY_VERSION}）"
+            else f"按需准备({HARNESS_DISPLAY_VERSION})"
         )
         self.environment_status.setText(
             f"Node.js：{node_version}\n"
@@ -703,12 +721,12 @@ class SettingsPage(QWidget):
         models = self._model_lines()
         if not base_url.startswith(("https://", "http://")):
             self.select_section(0)
-            self._show_validation("API 地址需要以 http:// 或 https:// 开头")
+            self._show_validation("API地址需要以http://或https://开头")
             self.base_url.setFocus()
             return
         if not models:
             self.select_section(0)
-            self._show_validation("请至少保留一个模型 ID")
+            self._show_validation("请至少保留一个模型ID")
             self.models_edit.setFocus()
             return
         values = self.values()
@@ -730,6 +748,8 @@ class SettingsPage(QWidget):
             "default_effort": self.default_effort.currentData(),
             "deep_thinking": self.deep_thinking.isChecked(),
             "web_search": self.web_search.isChecked(),
+            "search_provider": self.search_provider.currentData(),
+            "search_api_key": self.search_api_key.text().strip(),
             "max_tokens": self.max_tokens.value(),
             "theme": self.theme_combo.currentData(),
             "system_prompt": self.system_prompt_edit.toPlainText().strip(),

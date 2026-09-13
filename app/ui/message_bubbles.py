@@ -11,6 +11,7 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QRectF,
+    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -22,13 +23,17 @@ from PySide6.QtGui import (
     QColor,
     QConicalGradient,
     QDesktopServices,
+    QFontMetricsF,
     QGuiApplication,
     QIcon,
     QImage,
+    QLinearGradient,
     QPen,
     QPainter,
     QPixmap,
+    QTextCursor,
     QTextDocument,
+    QTextCharFormat,
 )
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -52,12 +57,13 @@ from PySide6.QtWidgets import (
 from .. import ASSETS_DIR
 from ..markdown import to_html
 from .controls import build_flat_menu
+from .image_strip import rounded_thumbnail
 from .icons import apply_icon, tint_pixmap
-from .theme import colors
+from .theme import CHAT_BUBBLE_RADIUS, colors
 
 
-IMAGE_MAX_HEIGHT = 180
-IMAGE_MAX_WIDTH = 250
+IMAGE_THUMB_SIZE = 160
+IMAGE_GRID_COLUMNS = 3
 LANE_MAX_WIDTH = 840
 KATEX_DIR = ASSETS_DIR / "vendor" / "katex"
 
@@ -108,9 +114,11 @@ _MATH_WEB_SHELL = r"""<!doctype html>
         Math.ceil(root.getBoundingClientRect().height)
       );
 
-      // When the host clamps this surface (very long answers or reasoning),
-      // the page keeps the overflow itself instead of forwarding wheel events
-      // to the outer message lane, so nothing becomes unreachable.
+      // A very long answer may exceed the maximum safe texture height of the
+      // embedded page.  In that case the native surface is intentionally
+      // clamped, so let the page scroll its own overflow instead of clipping
+      // the tail of the answer.  Short answers keep the page overflow hidden
+      // and continue to use the outer chat lane as their only scroller.
       let internalScroll = false;
       const syncScrollMode = () => {
         internalScroll = measuredHeight() > window.innerHeight + 2;
@@ -135,6 +143,61 @@ _MATH_WEB_SHELL = r"""<!doctype html>
           const overflowing = inline.scrollWidth > inline.clientWidth + 4;
           inline.classList.toggle("is-overflowing", overflowing);
           inline.setAttribute("tabindex", overflowing ? "0" : "-1");
+        });
+      };
+
+      let revealLength = Number.POSITIVE_INFINITY;
+      let revealTotalLength = 0;
+      let revealCharacters = [];
+
+      const shouldSkipReveal = (node) => {
+        const element = node.parentElement;
+        return element && element.closest(
+          ".code-toolbar, .katex-mathml, .math-source"
+        );
+      };
+
+      const prepareReveal = () => {
+        revealCharacters = [];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        let node = walker.nextNode();
+        while (node) {
+          if (node.nodeValue && !shouldSkipReveal(node)) {
+            textNodes.push(node);
+          }
+          node = walker.nextNode();
+        }
+
+        textNodes.forEach((textNode) => {
+          if (!textNode.parentNode || shouldSkipReveal(textNode)) return;
+          const fragment = document.createDocumentFragment();
+          [...textNode.nodeValue].forEach((character) => {
+            const span = document.createElement("span");
+            span.className = "deepseek-type-char";
+            span.textContent = character;
+            fragment.appendChild(span);
+            revealCharacters.push(span);
+          });
+          textNode.parentNode.replaceChild(fragment, textNode);
+        });
+      };
+
+      const applyReveal = () => {
+        const visible = Number.isFinite(revealLength)
+          ? revealTotalLength > 0
+            ? Math.min(
+                revealCharacters.length,
+                Math.ceil(
+                  revealCharacters.length
+                  * Math.max(0, revealLength)
+                  / revealTotalLength
+                )
+              )
+            : Math.max(0, Math.floor(revealLength))
+          : revealCharacters.length;
+        revealCharacters.forEach((character, index) => {
+          character.style.visibility = index < visible ? "visible" : "hidden";
         });
       };
 
@@ -169,9 +232,21 @@ _MATH_WEB_SHELL = r"""<!doctype html>
         });
       };
 
-      window.setDeepSeekContent = (markup) => {
+      window.setDeepSeekContent = (markup, reveal, total) => {
         root.innerHTML = markup;
         renderFormulas();
+        revealLength = Number.isFinite(reveal)
+          ? Math.max(0, Math.floor(reveal))
+          : Number.POSITIVE_INFINITY;
+        revealTotalLength = Number.isFinite(total)
+          ? Math.max(0, Math.floor(total))
+          : 0;
+        if (Number.isFinite(revealLength)) {
+          prepareReveal();
+          applyReveal();
+        } else {
+          revealCharacters = [];
+        }
         reportLayout();
         requestAnimationFrame(reportLayout);
         if (document.fonts && document.fonts.ready) {
@@ -180,6 +255,15 @@ _MATH_WEB_SHELL = r"""<!doctype html>
         return measuredHeight();
       };
       window.refreshDeepSeekLayout = reportLayout;
+      window.setDeepSeekReveal = (reveal, total) => {
+        revealLength = Number.isFinite(reveal)
+          ? Math.max(0, Math.floor(reveal))
+          : Number.POSITIVE_INFINITY;
+        if (Number.isFinite(total)) {
+          revealTotalLength = Math.max(0, Math.floor(total));
+        }
+        applyReveal();
+      };
 
       document.addEventListener("click", (event) => {
         const button = event.target instanceof Element
@@ -209,11 +293,24 @@ _MATH_WEB_SHELL = r"""<!doctype html>
       window.addEventListener("resize", () => requestAnimationFrame(reportLayout));
       document.addEventListener("wheel", (event) => {
         if (internalScroll) {
-          const maxScroll = Math.max(0, measuredHeight() - window.innerHeight);
-          const atEdge = (event.deltaY < 0 && window.scrollY <= 0)
-            || (event.deltaY > 0 && window.scrollY >= maxScroll - 1);
-          // Keep scrolling inside a clamped block until it reaches an edge,
-          // then hand the gesture back to the message lane.
+          const documentElement = document.documentElement;
+          const body = document.body;
+          const scrollTop = Math.max(
+            window.scrollY || 0,
+            documentElement.scrollTop || 0,
+            body.scrollTop || 0
+          );
+          const contentHeight = Math.max(
+            documentElement.scrollHeight || 0,
+            body.scrollHeight || 0
+          );
+          const maxScroll = Math.max(0, contentHeight - window.innerHeight);
+          const atEdge = (
+            (event.deltaY < 0 && scrollTop <= 0)
+            || (event.deltaY > 0 && scrollTop >= maxScroll - 1)
+          );
+          // Keep the gesture inside a clamped answer until it reaches an
+          // edge; only then should the outer message lane consume it.
           if (!atEdge) return;
         }
         const horizontalRegion = event.target instanceof Element
@@ -276,6 +373,8 @@ class _MathWebView(QWebEngineView):
         self._disposed = False
         self._ready = False
         self._pending_html = ""
+        self._pending_reveal_characters: int | None = None
+        self._pending_reveal_total_characters: int | None = None
         self._generation = 0
         self._rendered_generation = -1
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -323,13 +422,46 @@ class _MathWebView(QWebEngineView):
         base_url = QUrl.fromLocalFile(f"{KATEX_DIR.resolve()}/")
         self.setHtml(_MATH_WEB_SHELL, base_url)
 
-    def set_content(self, body: str) -> None:
+    def set_content(
+        self,
+        body: str,
+        reveal_characters: int | None = None,
+        reveal_total_characters: int | None = None,
+    ) -> None:
         if self._disposed:
             return
         self._pending_html = body
+        self._pending_reveal_characters = reveal_characters
+        self._pending_reveal_total_characters = reveal_total_characters
         self._generation += 1
         if self._ready:
             self._render_pending_content()
+
+    def set_reveal_characters(
+        self,
+        characters: int | None,
+        total_characters: int | None = None,
+    ) -> None:
+        if self._disposed:
+            return
+        self._pending_reveal_characters = characters
+        if total_characters is not None:
+            self._pending_reveal_total_characters = total_characters
+        if not self._ready or self.page() is None:
+            return
+        reveal = (
+            "null"
+            if characters is None
+            else str(max(0, int(characters)))
+        )
+        total = (
+            "null"
+            if self._pending_reveal_total_characters is None
+            else str(max(0, int(self._pending_reveal_total_characters)))
+        )
+        self.page().runJavaScript(
+            f"window.setDeepSeekReveal({reveal}, {total})"
+        )
 
     def _on_load_finished(self, succeeded: bool) -> None:
         if self._disposed:
@@ -343,7 +475,17 @@ class _MathWebView(QWebEngineView):
             return
         generation = self._generation
         payload = json.dumps(self._pending_html)
-        script = f"window.setDeepSeekContent({payload})"
+        reveal = (
+            "null"
+            if self._pending_reveal_characters is None
+            else str(max(0, int(self._pending_reveal_characters)))
+        )
+        total = (
+            "null"
+            if self._pending_reveal_total_characters is None
+            else str(max(0, int(self._pending_reveal_total_characters)))
+        )
+        script = f"window.setDeepSeekContent({payload}, {reveal}, {total})"
         self.page().runJavaScript(
             script,
             lambda height, current=generation: self._content_applied(current, height),
@@ -530,6 +672,10 @@ class RichText(QWidget):
         self._html = ""
         self._uses_math = False
         self._web_view: _MathWebView | None = None
+        self._reveal_characters: int | None = None
+        self._reveal_total_characters: int | None = None
+        self._text_formats: dict[int, QTextCharFormat] = {}
+        self._applied_reveal_characters = 0
 
         self._stack = QStackedLayout(self)
         self._stack.setContentsMargins(0, 0, 0, 0)
@@ -562,6 +708,8 @@ class RichText(QWidget):
         self._web_view = None
         self._stack.removeWidget(web_view)
         web_view.dispose()
+        self._text_formats.clear()
+        self._applied_reveal_characters = 0
 
     def clear_selection(self) -> None:
         if self._uses_math and self._web_view is not None:
@@ -574,17 +722,159 @@ class RichText(QWidget):
 
         return self._text_view.document()
 
-    def set_html(self, body: str) -> None:
+    def set_html(
+        self,
+        body: str,
+        reveal_characters: int | None = None,
+        reveal_total_characters: int | None = None,
+    ) -> None:
         self._html = body
+        self._reveal_characters = (
+            None
+            if reveal_characters is None
+            else max(0, int(reveal_characters))
+        )
+        self._reveal_total_characters = (
+            None
+            if reveal_total_characters is None
+            else max(0, int(reveal_total_characters))
+        )
         self._uses_math = "data-tex=" in body or "data-code-block=" in body
         if self._uses_math:
-            self._ensure_web_view().set_content(body)
+            self._ensure_web_view().set_content(
+                body,
+                self._reveal_characters,
+                self._reveal_total_characters,
+            )
         else:
             if self._web_view is not None:
                 self.dispose()
             self._text_view.setHtml(body)
             self._stack.setCurrentWidget(self._text_view)
+            self._prepare_text_reveal()
             self._schedule_fit()
+
+    def set_reveal_characters(self, characters: int | None) -> None:
+        self._reveal_characters = (
+            None if characters is None else max(0, int(characters))
+        )
+        if self._uses_math and self._web_view is not None:
+            self._web_view.set_reveal_characters(
+                self._reveal_characters,
+                self._reveal_total_characters,
+            )
+            return
+        self._apply_text_reveal()
+
+    def _prepare_text_reveal(self) -> None:
+        if self._uses_math:
+            return
+        document = self._text_view.document()
+        self._text_formats.clear()
+        block = document.begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    format_ = fragment.charFormat()
+                    start = fragment.position()
+                    for offset in range(len(fragment.text())):
+                        self._text_formats[start + offset] = format_
+                iterator += 1
+            block = block.next()
+        self._applied_reveal_characters = 0
+        if self._reveal_characters is None:
+            self._applied_reveal_characters = max(
+                0,
+                document.characterCount() - 1,
+            )
+        else:
+            self._apply_text_reveal()
+
+    def _apply_text_reveal(self) -> None:
+        if self._uses_math:
+            return
+        document = self._text_view.document()
+        document_length = max(0, document.characterCount() - 1)
+        if self._reveal_characters is None:
+            self._restore_text_formats(
+                document,
+                self._applied_reveal_characters,
+                document_length,
+            )
+            self._applied_reveal_characters = document_length
+            return
+        if self._reveal_total_characters:
+            visible = min(
+                document_length,
+                ceil(
+                    document_length
+                    * self._reveal_characters
+                    / self._reveal_total_characters
+                ),
+            )
+        else:
+            visible = min(document_length, self._reveal_characters)
+
+        if visible < self._applied_reveal_characters:
+            # A fresh document can arrive after a streaming renderer switch;
+            # recapture the original formats before revealing from the start.
+            self._text_view.setHtml(self._html)
+            self._prepare_text_reveal()
+            return
+
+        transparent = QTextCharFormat()
+        transparent.setForeground(QColor(0, 0, 0, 0))
+        if visible == 0 and document_length:
+            cursor = self._text_cursor_for_range(
+                document,
+                0,
+                document_length,
+            )
+            cursor.mergeCharFormat(transparent)
+        elif self._applied_reveal_characters == 0 and document_length:
+            cursor = self._text_cursor_for_range(
+                document,
+                visible,
+                document_length,
+            )
+            cursor.mergeCharFormat(transparent)
+
+        self._restore_text_formats(
+            document,
+            self._applied_reveal_characters,
+            visible,
+        )
+        self._applied_reveal_characters = visible
+
+    def _restore_text_formats(
+        self,
+        document: QTextDocument,
+        start: int,
+        end: int,
+    ) -> None:
+        for position in range(start, end):
+            format_ = self._text_formats.get(position)
+            if format_ is None:
+                continue
+            cursor = self._text_cursor_for_range(
+                document,
+                position,
+                position + 1,
+            )
+            cursor.setCharFormat(format_)
+
+    @staticmethod
+    def _text_cursor_for_range(
+        document: QTextDocument,
+        start: int,
+        end: int,
+    ) -> QTextCursor:
+        cursor = QTextCursor(document)
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        return cursor
 
     def _ensure_web_view(self) -> _MathWebView:
         if self._web_view is None:
@@ -598,6 +888,10 @@ class RichText(QWidget):
         if not self._uses_math or self._web_view is None:
             return
         self._stack.setCurrentWidget(self._web_view)
+        self._web_view.set_reveal_characters(
+            self._reveal_characters,
+            self._reveal_total_characters,
+        )
         self._fit_web_height(self._web_view.height())
 
     @Slot(int)
@@ -715,8 +1009,348 @@ class ThinkingIndicator(QWidget):
         painter.restore()
 
 
+_PREVIEW_SENTENCE_TERMINATORS = frozenset("。！？!?")
+_PREVIEW_SENTENCE_CLOSERS = frozenset("”’\"'）)]】》」』〉»›")
+
+
+def _extract_complete_sentences(text: str) -> list[str]:
+    """Return complete thought sentences while leaving a streaming tail out."""
+
+    source = str(text or "")
+    return [
+        source[start:end]
+        for start, end in _sentence_spans(source)
+    ]
+
+
+def _sentence_spans(
+    text: str,
+    *,
+    include_streaming_tail: bool = False,
+) -> list[tuple[int, int]]:
+    """Return source ranges whose starts are sentence starts.
+
+    The preview can still show an unfinished streaming tail, but a new
+    visual segment must never begin in the middle of a sentence.  Keeping
+    source offsets here lets the width-aware segmenter use sentence
+    boundaries without changing the text that is drawn.
+    """
+
+    source = str(text or "")
+    spans: list[tuple[int, int]] = []
+    start = 0
+    index = 0
+    length = len(source)
+    while index < length:
+        character = source[index]
+        is_terminator = character in _PREVIEW_SENTENCE_TERMINATORS
+        if character == ".":
+            next_index = index + 1
+            while (
+                next_index < length
+                and source[next_index] in _PREVIEW_SENTENCE_CLOSERS
+            ):
+                next_index += 1
+            next_character = source[next_index] if next_index < length else ""
+            prefix = source[start:index].strip()
+            # A period inside a decimal/version and a numbered list marker are
+            # not useful sentence boundaries for the tiny streaming preview.
+            is_terminator = (
+                next_index >= length
+                or next_character.isspace()
+            ) and not prefix.isdigit()
+        if not is_terminator:
+            index += 1
+            continue
+
+        end = index + 1
+        while end < length and source[end] in _PREVIEW_SENTENCE_TERMINATORS:
+            end += 1
+        while end < length and source[end] in _PREVIEW_SENTENCE_CLOSERS:
+            end += 1
+        content_start = start
+        while content_start < end and source[content_start].isspace():
+            content_start += 1
+        content_end = end
+        while content_end > content_start and source[content_end - 1].isspace():
+            content_end -= 1
+        if content_start < content_end:
+            spans.append((content_start, content_end))
+        start = end
+        index = end
+
+    if include_streaming_tail:
+        tail_start = start
+        while tail_start < length and source[tail_start].isspace():
+            tail_start += 1
+        tail_end = length
+        while tail_end > tail_start and source[tail_end - 1].isspace():
+            tail_end -= 1
+        if tail_start < tail_end:
+            spans.append((tail_start, tail_end))
+    return spans
+
+
+class ThinkingPreview(QWidget):
+    """A width-aware, 60fps ticker for the collapsed reasoning header.
+
+    The source is packed into visual-width windows, but each window begins at
+    a sentence boundary.  A streaming tail is kept in the source so the
+    header can remain informative before the next terminator arrives.  The
+    right edge of each window is softened by the paint-time fade.
+    """
+
+    FRAME_INTERVAL_MS = 16
+    TYPING_DURATION_MS = 500
+    CYCLE_DURATION_MS = 1000
+    FADE_WIDTH = 34
+
+    def __init__(self, theme: str = "light", parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("reasoningPreview")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(0)
+        self.setFixedHeight(20)
+
+        self._theme = theme
+        self._reasoning_text = ""
+        self._sentences: list[str] = []
+        self._segment_starts: list[int] = []
+        self._current_index = 0
+        self._current_sentence = ""
+        self._visible_characters = 0
+        self._running = False
+        self._elapsed = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.FRAME_INTERVAL_MS)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(self._advance)
+        self._text_color = QColor()
+        self._background_color = QColor()
+        self.apply_theme(theme)
+
+    @property
+    def sentences(self) -> tuple[str, ...]:
+        return tuple(self._sentences)
+
+    @property
+    def current_sentence(self) -> str:
+        return self._current_sentence
+
+    @property
+    def visible_text(self) -> str:
+        return self._current_sentence[: self._visible_characters]
+
+    def set_reasoning(self, reasoning: str) -> None:
+        # Keep the preview on one line while preserving the raw streaming
+        # tail.  In particular, do not wait for a sentence-ending character.
+        source = " ".join(str(reasoning or "").split())
+        if source == self._reasoning_text:
+            return
+        self._reasoning_text = source
+        self._rebuild_segments()
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        if self._sentences:
+            self._current_index %= len(self._sentences)
+            self._begin_cycle()
+        else:
+            self._visible_characters = 0
+            self.update()
+
+    def stop(self) -> None:
+        self._running = False
+        self._timer.stop()
+        self._elapsed.invalidate()
+        self._current_index = 0
+        self._current_sentence = ""
+        self._visible_characters = 0
+        self.update()
+
+    def apply_theme(self, theme: str) -> None:
+        self._theme = theme
+        palette = colors(theme)
+        self._text_color = QColor(palette["fg_muted"])
+        self._background_color = QColor(palette["reason_bg"])
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rebuild_segments()
+
+    def _rebuild_segments(self) -> None:
+        """Pack visual windows without starting one inside a sentence."""
+
+        source = self._reasoning_text
+        old_start = (
+            self._segment_starts[self._current_index]
+            if self._segment_starts
+            and self._current_index < len(self._segment_starts)
+            else 0
+        )
+        old_visible = self._visible_characters
+        if not source:
+            self._sentences = []
+            self._segment_starts = []
+            self._current_index = 0
+            self._current_sentence = ""
+            self._visible_characters = 0
+            self._timer.stop()
+            self.update()
+            return
+
+        metrics = QFontMetricsF(self.font())
+        # Include the fade region in the segment so the final characters are
+        # present underneath the gradient instead of being hard-clipped at
+        # the first pixel outside the header.
+        max_width = max(1.0, float(self.width())) + self.FADE_WIDTH
+        segments: list[str] = []
+        starts: list[int] = []
+        spans = _sentence_spans(source, include_streaming_tail=True)
+        span_index = 0
+        while span_index < len(spans):
+            segment_start, segment_end = spans[span_index]
+            next_index = span_index + 1
+            while next_index < len(spans):
+                candidate_end = spans[next_index][1]
+                if (
+                    metrics.horizontalAdvance(
+                        source[segment_start:candidate_end]
+                    )
+                    > max_width
+                ):
+                    break
+                segment_end = candidate_end
+                next_index += 1
+
+            starts.append(segment_start)
+            segments.append(source[segment_start:segment_end])
+            span_index = next_index
+
+        self._sentences = segments
+        self._segment_starts = starts
+        if starts:
+            # Keep the current window stable when a new stream chunk arrives;
+            # after a resize, choose the window that contains its old start.
+            index = 0
+            for candidate, candidate_start in enumerate(starts):
+                if candidate_start <= old_start:
+                    index = candidate
+                else:
+                    break
+            self._current_index = min(index, len(segments) - 1)
+            self._current_sentence = segments[self._current_index]
+            self._visible_characters = min(old_visible, len(self._current_sentence))
+        else:
+            self._current_index = 0
+            self._current_sentence = ""
+            self._visible_characters = 0
+
+        if self._running and not self._timer.isActive() and self._sentences:
+            self._begin_cycle()
+        self.update()
+
+    def _begin_cycle(self) -> None:
+        if not self._running or not self._sentences:
+            return
+        self._current_sentence = self._sentences[self._current_index]
+        self._visible_characters = 0
+        if self._elapsed.isValid():
+            self._elapsed.restart()
+        else:
+            self._elapsed.start()
+        self._timer.start()
+        self.update()
+
+    def _advance(self) -> None:
+        if not self._running or not self._sentences:
+            self._timer.stop()
+            return
+        if not self._elapsed.isValid():
+            self._elapsed.start()
+
+        elapsed = self._elapsed.elapsed()
+        if elapsed >= self.CYCLE_DURATION_MS:
+            self._current_index = (self._current_index + 1) % len(self._sentences)
+            self._begin_cycle()
+            return
+
+        if elapsed < self.TYPING_DURATION_MS:
+            target_visible = min(
+                len(self._current_sentence),
+                int(
+                    ceil(
+                        len(self._current_sentence)
+                        * elapsed
+                        / self.TYPING_DURATION_MS
+                    )
+                ),
+            )
+            # A streaming update can extend the current width window while
+            # its timer is already part-way through the typing phase.  Never
+            # retract characters that were already painted in that case.
+            visible = max(self._visible_characters, target_visible)
+        else:
+            visible = len(self._current_sentence)
+        if visible != self._visible_characters:
+            self._visible_characters = visible
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        if not self._current_sentence:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setClipRect(self.rect())
+        metrics = QFontMetricsF(self.font())
+        baseline = (self.height() - metrics.height()) / 2 + metrics.ascent()
+        painter.setPen(self._text_color)
+        painter.drawText(QPointF(0, baseline), self.visible_text)
+
+        full_width = metrics.horizontalAdvance(self._current_sentence)
+        visible_width = metrics.horizontalAdvance(self.visible_text)
+        if full_width > self.width() and visible_width > self.width():
+            fade_width = min(
+                self.FADE_WIDTH,
+                max(12, self.width() // 5),
+            )
+            fade_start = max(0, self.width() - fade_width)
+            transparent = QColor(self._background_color)
+            transparent.setAlpha(0)
+            opaque = QColor(self._background_color)
+            gradient = QLinearGradient(
+                float(fade_start),
+                0.0,
+                float(self.width()),
+                0.0,
+            )
+            gradient.setColorAt(0.0, transparent)
+            gradient.setColorAt(1.0, opaque)
+            painter.fillRect(
+                QRectF(fade_start, 0, self.width() - fade_start, self.height()),
+                gradient,
+            )
+        painter.end()
+
+    def sizeHint(self) -> QSize:
+        return QSize(120, 20)
+
+
 class ReasoningPanel(QFrame):
     heightChanged = Signal()
+
+    THINKING_PHASE = "thinking"
+    SEARCHING_PHASE = "searching"
+    _RUNNING_LABELS = {
+        THINKING_PHASE: "正在深度思考",
+        SEARCHING_PHASE: "正在联网搜索",
+    }
 
     def __init__(
         self,
@@ -730,6 +1364,8 @@ class ReasoningPanel(QFrame):
         self._theme = theme
         self._reasoning = reasoning
         self._rendered_reasoning: str | None = None
+        self._running = False
+        self._phase = self.THINKING_PHASE
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 7, 10, 8)
@@ -745,7 +1381,8 @@ class ReasoningPanel(QFrame):
         self.toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle.toggled.connect(self._toggle_reasoning)
         header.addWidget(self.toggle)
-        header.addStretch()
+        self.preview = ThinkingPreview(theme)
+        header.addWidget(self.preview, 1)
         layout.addLayout(header)
 
         self.reasoning_view = RichText()
@@ -757,22 +1394,50 @@ class ReasoningPanel(QFrame):
         self.apply_theme(theme)
 
     def set_reasoning(self, reasoning: str) -> None:
+        self._reasoning = reasoning
+        self.preview.set_reasoning(reasoning)
         if reasoning == self._rendered_reasoning:
             return
-        self._reasoning = reasoning
         self.reasoning_view.set_html(
             to_html(reasoning, dark=self._theme == "dark")
         )
         self._rendered_reasoning = reasoning
 
     def set_running(self, running: bool) -> None:
+        self._running = running
         if running:
             self.indicator.start()
-            self.toggle.setText("正在深度思考")
+            self.toggle.setText(self._RUNNING_LABELS[self._phase])
+            self.preview.start()
+            self.preview.show()
         else:
             self.indicator.stop()
             self.toggle.setText("已完成深度思考")
+            self.preview.stop()
+            # Keep the expanding preview slot in the header even when its
+            # text is empty. Hiding that item makes QBoxLayout redistribute
+            # the remaining controls around the center of the panel.
+            self.preview.show()
         self._refresh_arrow()
+
+    def set_running_label(self, text: str) -> None:
+        """Keep the old string-based API while making the phase explicit."""
+
+        phase = (
+            self.SEARCHING_PHASE
+            if str(text).strip().startswith("正在联网搜索")
+            else self.THINKING_PHASE
+        )
+        self.set_phase(phase)
+
+    def set_phase(self, phase: str) -> None:
+        """Set the current running operation without changing completion state."""
+
+        self._phase = (
+            phase if phase in self._RUNNING_LABELS else self.THINKING_PHASE
+        )
+        if self._running:
+            self.toggle.setText(self._RUNNING_LABELS[self._phase])
 
     def _toggle_reasoning(self, checked: bool) -> None:
         self.reasoning_view.setVisible(checked and bool(self._reasoning))
@@ -789,6 +1454,7 @@ class ReasoningPanel(QFrame):
         self._theme = theme
         palette = colors(theme)
         self.indicator.set_theme(theme)
+        self.preview.apply_theme(theme)
         if theme_changed:
             self._rendered_reasoning = None
             self.set_reasoning(self._reasoning)
@@ -799,33 +1465,71 @@ class ReasoningPanel(QFrame):
 
 
 class OpenImageLabel(QLabel):
-    def __init__(self, path: str, parent=None) -> None:
+    """Clickable image surface whose rounded image and border are composited."""
+
+    def __init__(
+        self,
+        path: str,
+        parent=None,
+        size: int = IMAGE_THUMB_SIZE,
+    ) -> None:
         super().__init__(parent)
         self._path = path
+        self._size = size
+        self._has_image = not QImage(path).isNull()
+        self._fallback_text = "" if self._has_image else Path(path).name
+        self._text_color = QColor()
+        self._thumbnail = QPixmap()
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("单击打开原图")
+        self.apply_theme("light")
 
-    def mouseDoubleClickEvent(self, event) -> None:
+    def apply_theme(self, theme: str) -> None:
+        palette = colors(theme)
+        self._text_color = QColor(palette["fg_sub"])
+        self._thumbnail = rounded_thumbnail(
+            self._path,
+            self._size,
+            border_color=palette["border_strong"],
+            background_color=palette["canvas"],
+        )
+        super().setPixmap(self._thumbnail)
+        # The border is already part of _thumbnail.  A stylesheet border here
+        # would be a second stroke and can cover its antialiased corners.
+        self.setStyleSheet("background:transparent;border:none;")
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self._thumbnail.isNull():
+            painter.drawPixmap(0, 0, self._thumbnail)
+        if self._fallback_text:
+            painter.setPen(self._text_color)
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                self._fallback_text,
+            )
+        painter.end()
+
+    def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._path))
-        super().mouseDoubleClickEvent(event)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
-def _image_label(path: str, parent=None) -> QLabel:
-    label = OpenImageLabel(path, parent)
-    image = QImage(path)
-    if image.isNull():
-        label.setText(Path(path).name)
-        return label
-    image = image.scaled(
-        IMAGE_MAX_WIDTH,
-        IMAGE_MAX_HEIGHT,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-    label.setPixmap(QPixmap.fromImage(image))
-    label.setFixedSize(image.size())
-    label.setCursor(Qt.CursorShape.PointingHandCursor)
-    label.setToolTip("双击打开原图")
-    return label
+def _image_label(
+    path: str,
+    parent=None,
+    size: int = IMAGE_THUMB_SIZE,
+) -> OpenImageLabel:
+    return OpenImageLabel(path, parent, size)
 
 
 class MessageBubble(QWidget):
@@ -876,14 +1580,20 @@ class UserBubble(MessageBubble):
         card_layout.setSpacing(8)
 
         image_paths = images or []
+        self._image_labels: list[OpenImageLabel] = []
         if image_paths:
             image_grid = QGridLayout()
+            image_grid.setContentsMargins(0, 0, 0, 0)
             image_grid.setHorizontalSpacing(7)
             image_grid.setVerticalSpacing(7)
-            for index, image_path in enumerate(image_paths[:4]):
-                image_grid.addWidget(_image_label(image_path), index // 2, index % 2)
-            if len(image_paths) > 4:
-                image_grid.addWidget(QLabel(f"另有 {len(image_paths) - 4} 张"), 2, 0)
+            for index, image_path in enumerate(image_paths):
+                image_label = _image_label(image_path)
+                self._image_labels.append(image_label)
+                image_grid.addWidget(
+                    image_label,
+                    index // IMAGE_GRID_COLUMNS,
+                    index % IMAGE_GRID_COLUMNS,
+                )
             card_layout.addLayout(image_grid)
 
         if text.strip():
@@ -911,8 +1621,11 @@ class UserBubble(MessageBubble):
         palette = colors(theme)
         self.card.setStyleSheet(
             f"QFrame#userBubble{{background:{palette['user_bubble']};"
-            f"border:none;border-radius:14px;color:{palette['fg']};}}"
+            f"border:none;border-radius:{CHAT_BUBBLE_RADIUS}px;"
+            f"color:{palette['fg']};}}"
         )
+        for image_label in self._image_labels:
+            image_label.apply_theme(theme)
         if hasattr(self, "text_view"):
             self.text_view.setStyleSheet(
                 f"background:transparent;color:{palette['fg']};border:none;"
@@ -926,6 +1639,8 @@ class UserBubble(MessageBubble):
 class AssistantBubble(MessageBubble):
     role = "assistant"
     layoutHeightChanged = Signal()
+    CONTENT_TYPING_INTERVAL_MS = 28
+    CONTENT_TYPING_STEPS = 36
 
     def __init__(
         self,
@@ -941,8 +1656,10 @@ class AssistantBubble(MessageBubble):
         self._plain = content
         self._reasoning = reasoning
         self._streaming = streaming
-        self._answer_started = bool(content)
         self._content_dirty = bool(content)
+        self._typing_enabled = streaming
+        self._typing_visible_characters = 0
+        self._operation_phase = ReasoningPanel.THINKING_PHASE
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 10, 24, 10)
@@ -1017,13 +1734,20 @@ class AssistantBubble(MessageBubble):
         self._content_timer.setSingleShot(True)
         self._content_timer.setInterval(60)
         self._content_timer.timeout.connect(self._render_content)
+        self._typing_timer = QTimer(self)
+        self._typing_timer.setInterval(self.CONTENT_TYPING_INTERVAL_MS)
+        self._typing_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._typing_timer.timeout.connect(self._advance_content_typing)
         self._reasoning_timer = QTimer(self)
         self._reasoning_timer.setSingleShot(True)
         self._reasoning_timer.setInterval(80)
         self._reasoning_timer.timeout.connect(self._render_reasoning)
 
         if content:
-            self._render_content()
+            if self._typing_enabled:
+                self._start_content_typing()
+            else:
+                self._render_content()
         if streaming and not thinking:
             self.status_indicator.start()
             self.status_row.show()
@@ -1038,10 +1762,12 @@ class AssistantBubble(MessageBubble):
             return
         self._disposed = True
         self._content_timer.stop()
+        self._typing_timer.stop()
         self._reasoning_timer.stop()
         self.status_indicator.stop()
         if self.reasoning_panel is not None:
             self.reasoning_panel.indicator.stop()
+            self.reasoning_panel.preview.stop()
             self.reasoning_panel.reasoning_view.dispose()
         self.content_view.dispose()
 
@@ -1049,6 +1775,39 @@ class AssistantBubble(MessageBubble):
         self.content_view.clear_selection()
         if self.reasoning_panel is not None:
             self.reasoning_panel.reasoning_view.clear_selection()
+
+    def set_status(self, text: str) -> None:
+        if self._disposed or not self._streaming:
+            return
+        self._operation_phase = (
+            ReasoningPanel.SEARCHING_PHASE
+            if str(text).strip().startswith("正在联网搜索")
+            else ReasoningPanel.THINKING_PHASE
+        )
+        if self.reasoning_panel is not None:
+            # A tool-call preamble may already have caused begin_answer() to
+            # stop the panel. Every status event is a fresh operation phase,
+            # so explicitly restart the running state here.
+            self.reasoning_panel.set_phase(self._operation_phase)
+            self.reasoning_panel.set_running(True)
+            if self.status_row.isVisible():
+                self.status_row.hide()
+                self.layoutHeightChanged.emit()
+            return
+
+        # Standard mode has no reasoning content, but a web-search request
+        # still needs to expose what the worker is doing.
+        label = (
+            "正在联网搜索"
+            if self._operation_phase == ReasoningPanel.SEARCHING_PHASE
+            else "正在生成"
+        )
+        self.status_label.setText(label)
+        self.status_indicator.start()
+        was_visible = self.status_row.isVisible()
+        self.status_row.show()
+        if not was_visible:
+            self.layoutHeightChanged.emit()
 
     def set_reasoning(self, reasoning: str) -> None:
         if self._disposed:
@@ -1060,10 +1819,14 @@ class AssistantBubble(MessageBubble):
                 running=self._streaming,
                 theme=self._theme,
             )
+            self.reasoning_panel.set_phase(self._operation_phase)
             self.reasoning_panel.heightChanged.connect(self.layoutHeightChanged)
             layout = self.layout().itemAt(1).layout()
             insert_at = layout.indexOf(self.status_row)
             layout.insertWidget(insert_at, self.reasoning_panel)
+            if self.status_row.isVisible():
+                self.status_row.hide()
+                self.layoutHeightChanged.emit()
         if not self._reasoning_timer.isActive():
             self._reasoning_timer.start()
 
@@ -1074,19 +1837,21 @@ class AssistantBubble(MessageBubble):
     def begin_answer(self) -> None:
         if self._disposed:
             return
-        if self._answer_started:
-            return
-        self._answer_started = True
         if self.reasoning_panel:
             self.reasoning_panel.set_running(False)
         self.status_indicator.stop()
+        was_visible = self.status_row.isVisible()
         self.status_row.hide()
         self.content_view.show()
+        if was_visible:
+            self.layoutHeightChanged.emit()
 
     def set_content(self, content: str) -> None:
         if self._disposed:
             return
         self._plain = content
+        if self._streaming:
+            self._typing_enabled = True
         self._content_dirty = True
         self.begin_answer()
         if not self._content_timer.isActive():
@@ -1096,9 +1861,94 @@ class AssistantBubble(MessageBubble):
         if self._disposed or not self._content_dirty:
             return
         self._content_dirty = False
-        self.content_view.set_html(
-            to_html(self._plain, dark=self._theme == "dark")
+        if (
+            self._typing_enabled
+            and self._plain
+            and self._typing_visible_characters == 0
+        ):
+            self._typing_visible_characters = 1
+        self._typing_visible_characters = min(
+            self._typing_visible_characters,
+            len(self._plain),
         )
+        reveal_characters = (
+            self._typing_visible_characters
+            if self._typing_enabled
+            else None
+        )
+        self.content_view.set_html(
+            to_html(self._plain, dark=self._theme == "dark"),
+            reveal_characters=reveal_characters,
+            reveal_total_characters=(
+                len(self._plain) if self._typing_enabled else None
+            ),
+        )
+        if (
+            self._typing_enabled
+            and self._typing_visible_characters < len(self._plain)
+            and not self._typing_timer.isActive()
+        ):
+            self._typing_timer.start()
+
+    def _start_content_typing(self) -> None:
+        """Reveal the answer source in small batches from its first character."""
+
+        if self._disposed or not self._typing_enabled or not self._plain:
+            return
+        if self._typing_visible_characters == 0:
+            self._typing_visible_characters = 1
+        self._content_dirty = True
+        self._render_content()
+        if self._typing_visible_characters < len(self._plain):
+            self._typing_timer.start()
+        elif not self._streaming:
+            self._finish_content_typing()
+
+    def _advance_content_typing(self) -> None:
+        if self._disposed or not self._typing_enabled:
+            self._typing_timer.stop()
+            return
+
+        target_length = len(self._plain)
+        if target_length <= self._typing_visible_characters:
+            self._typing_timer.stop()
+            if not self._streaming:
+                self._finish_content_typing()
+            return
+
+        remaining = target_length - self._typing_visible_characters
+        step = max(1, ceil(remaining / self.CONTENT_TYPING_STEPS))
+        self._typing_visible_characters = min(
+            target_length,
+            self._typing_visible_characters + step,
+        )
+        if self._content_dirty:
+            # A new stream chunk may be waiting for the debounce timer. Make
+            # sure the reveal is applied to the newest DOM rather than to the
+            # previous chunk's document.
+            self._render_content()
+        else:
+            self.content_view.set_reveal_characters(
+                self._typing_visible_characters
+            )
+
+        if (
+            self._typing_visible_characters >= target_length
+            and not self._streaming
+        ):
+            self._finish_content_typing()
+
+    def _finish_content_typing(self) -> None:
+        if self._disposed:
+            return
+        self._typing_timer.stop()
+        self._typing_enabled = False
+        self._typing_visible_characters = len(self._plain)
+        self._content_dirty = False
+        self.content_view.set_reveal_characters(None)
+        self.content_view.setVisible(bool(self._plain))
+        self.actions.setVisible(bool(self._plain) and not self._streaming)
+        self.layoutHeightChanged.emit()
 
     def finish(self, stopped: bool = False) -> None:
         if self._disposed:
@@ -1107,14 +1957,23 @@ class AssistantBubble(MessageBubble):
         self._content_timer.stop()
         self._reasoning_timer.stop()
         self._render_reasoning()
-        self._render_content()
+        if self._typing_enabled and self._plain:
+            if self._typing_visible_characters < len(self._plain):
+                self._content_dirty = True
+                self._render_content()
+                self._typing_timer.start()
+            else:
+                self._finish_content_typing()
+        else:
+            self._render_content()
         if self.reasoning_panel:
             self.reasoning_panel.set_running(False)
         self.status_indicator.stop()
         self.status_row.hide()
         self.content_view.setVisible(bool(self._plain))
         self.completion_label.setText("已停止" if stopped else "")
-        self.actions.setVisible(bool(self._plain))
+        if not self._typing_timer.isActive():
+            self.actions.setVisible(bool(self._plain))
 
     def fail(self, message: str) -> None:
         if self._disposed:

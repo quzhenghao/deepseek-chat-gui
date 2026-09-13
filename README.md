@@ -24,6 +24,12 @@
 
 侧栏管理本地对话，顶部 `Work Type` 在 Chat 与 Harness 之间切换，输入框会根据当前是否有消息自动切换为居中布局或底部停靠布局。
 
+### 联网搜索与引用
+
+![联网搜索与引用](assets/screenshots/web-search.png)
+
+打开输入框中的“联网搜索”后，客户端会执行模型发起的搜索请求，将结果带编号回传，并在回答正文和“参考来源”中保留可点击的引用链接。
+
 ### 复杂数学回答与本地 LaTeX 渲染
 
 ![复杂数学回答](assets/screenshots/chat-latex.png)
@@ -57,7 +63,7 @@
 
 - DeepSeek API 流式输出和深度思考
 - `low`、`high`、`max` 三档思考强度
-- 联网搜索按钮与“默认开启联网搜索”设置，通过 DeepSeek Responses API 的 `web_search` 工具接入
+- 联网搜索按钮与“默认开启联网搜索”设置，通过 DeepSeek 官方 `function` 工具调用接入；客户端实际执行搜索并把带编号的来源回传给模型，回答中按 `[1]`、`[2]` 标注引用并列出参考来源
 - 视觉模型图片输入：选择、拖入或粘贴图片
 - Markdown、代码块、复制按钮、表格、引用、链接和离线 KaTeX
 - 用户与 AI 消息均可用文本光标选中
@@ -187,7 +193,7 @@ deepseek-chat-gui/
 │   └── ui/                 Chat、Harness、设置页和主题
 ├── assets/
 │   ├── vendor/katex/       随应用打包的 KaTeX 资源
-│   └── screenshots/        README 界面截图
+│   └── screenshots/        README 界面与联网搜索截图
 ├── scripts/                Harness 供应、DMG 构建和 GitHub 发布
 ├── tests/                  API、渲染、配置、存储和 UI 回归测试
 ├── DeepSeekChat.spec       PyInstaller 配置

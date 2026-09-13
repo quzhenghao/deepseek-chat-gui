@@ -22,7 +22,13 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signa
 from PySide6.QtNetwork import QTcpSocket
 
 from . import HARNESS_BUNDLE_DIR
-from .config import APP_DIR, DEFAULT_BASE_URL
+from .config import (
+    APP_DIR,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODELS,
+    MODEL_CAPABILITIES,
+    MODEL_LABELS,
+)
 
 
 HARNESS_PACKAGE = "@deepseek-ai/dsh@0.1.5-rc.1"
@@ -134,6 +140,22 @@ def _yaml_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _harness_model_entries() -> str:
+    entries: list[str] = []
+    for model in DEFAULT_MODELS:
+        capabilities = MODEL_CAPABILITIES.get(model, {})
+        modalities = "text, image" if capabilities.get("vision") else "text"
+        entries.append(
+            f"    - id: {model}\n"
+            f"      name: {MODEL_LABELS.get(model, model)}\n"
+            "      contextWindow: 1000000\n"
+            "      maxTokens: 256000\n"
+            f"      inputModalities: [{modalities}]\n"
+            "      systemPromptUpdate: in-history\n"
+        )
+    return "".join(entries)
+
+
 def ensure_harness_defaults(home: Path, cfg: dict) -> Path:
     """Create the first-party adapter settings once, without overwriting edits."""
 
@@ -152,12 +174,7 @@ def ensure_harness_defaults(home: Path, cfg: dict) -> Path:
         "  reasoningEffort: high\n"
         "  maxTokens: 256000\n"
         "  models:\n"
-        "    - id: deepseek-flash\n"
-        "      name: DeepSeek V4.1 Flash\n"
-        "      contextWindow: 1000000\n"
-        "      maxTokens: 256000\n"
-        "      inputModalities: [text, image]\n"
-        "      systemPromptUpdate: in-history\n",
+        + _harness_model_entries(),
         encoding="utf-8",
     )
     return settings
@@ -230,7 +247,7 @@ class HarnessRuntime(QObject):
             arguments = ["--yes", "--prefer-offline", HARNESS_PACKAGE]
         else:
             self.failed.emit(
-                "未找到可用的 Harness 运行环境。请重新安装完整应用，或安装 Node.js 22.19+ / 24+ 后重试。"
+                "未找到可用的Harness运行环境。请重新安装完整应用，或安装Node.js 22.19+/24+后重试。"
             )
             return
 
@@ -240,7 +257,7 @@ class HarnessRuntime(QObject):
             (home / "npm-cache").mkdir(parents=True, exist_ok=True)
             (home / "browser-cache").mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            self.failed.emit(f"无法准备 Harness 本地目录：{exc}")
+            self.failed.emit(f"无法准备Harness本地目录：{exc}")
             return
 
         self._port = find_free_port()
@@ -309,7 +326,7 @@ class HarnessRuntime(QObject):
             previous.blockSignals(True)
             previous.deleteLater()
         self._process = process
-        self.stateChanged.emit("正在启动官方 Harness…")
+        self.stateChanged.emit("正在启动官方Harness...")
         process.start()
         self._remember_process_group(process)
         self._deadline_timer.start(HARNESS_START_TIMEOUT_MS)
@@ -339,7 +356,7 @@ class HarnessRuntime(QObject):
             self._process_group_id = None
             self.stopped.emit()
             return
-        self.stateChanged.emit("正在关闭 Harness…")
+        self.stateChanged.emit("正在关闭Harness...")
         self._terminate_process_group(signal.SIGTERM)
         process.terminate()
         if not process.waitForFinished(5000):
@@ -519,14 +536,14 @@ class HarnessRuntime(QObject):
             return
         self._ready = True
         self._deadline_timer.stop()
-        self.stateChanged.emit("Harness 已就绪")
+        self.stateChanged.emit("Harness已就绪")
         self.ready.emit(self._url)
 
     def _process_error(self, error) -> None:
         if self._stopping:
             return
         if error == QProcess.ProcessError.FailedToStart:
-            self.failed.emit("无法启动 npx，请检查 Node.js 安装和 PATH。")
+            self.failed.emit("无法启动npx，请检 Node.js安装和PATH")
 
     def _process_finished(self, _exit_code: int, _status) -> None:
         self._read_output()
@@ -547,16 +564,16 @@ class HarnessRuntime(QObject):
         if self._stopping:
             self.stopped.emit()
         elif was_ready:
-            self.failed.emit("Harness 服务已停止，请重新启动。")
+            self.failed.emit("Harness服务已停止，请重新启动")
         else:
             self.failed.emit(
-                "Harness 进程提前退出。请检查 Node.js、网络连接或查看 Harness 日志后重试。"
+                "Harness进程提前退出。请检查Node.js、网络连接或查看Harness日志后重试"
             )
 
     def _startup_timed_out(self) -> None:
         if self._ready or self._stopping:
             return
-        self.failed.emit("Harness 启动超时。首次启动需要下载官方运行包，请稍后重试。")
+        self.failed.emit("Harness启动超时。首次启动需要下载官方运行包，请稍后重试")
         self.stop()
 
 

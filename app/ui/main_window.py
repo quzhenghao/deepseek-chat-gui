@@ -68,6 +68,9 @@ from .sidebar import ProductModeSelector, Sidebar
 from .harness_page import HarnessPage
 from .theme import (
     RAIL_SIDEBAR_WIDTH,
+    RIGHT_HEADER_HEIGHT,
+    RIGHT_HEADER_MARGINS,
+    RIGHT_HEADER_SPACING,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MIN_WIDTH,
     build_qss,
@@ -139,7 +142,7 @@ class ChatTextEdit(QTextEdit):
         )
 
     def set_placeholder(self, vision: bool) -> None:
-        text = "给 DeepSeek 发送消息"
+        text = "给DeepSeek发送消息"
         if vision:
             text += "，或拖入图片"
         self.setPlaceholderText(text)
@@ -222,7 +225,7 @@ class InputPanel(QWidget):
         self.search_button.setCheckable(True)
         self.search_button.setChecked(web_search)
         self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_button.setToolTip("使用 DeepSeek Responses API 联网搜索")
+        self.search_button.setToolTip("使用DeepSeek_Responses_API联网搜索")
         self.search_button.toggled.connect(self._web_search_toggled)
         toolbar.addWidget(self.search_button)
 
@@ -396,7 +399,9 @@ class InputPanel(QWidget):
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         palette = colors(theme)
-        apply_icon(self.attach_button, "plus", palette["fg_sub"], 19)
+        # An even icon canvas centers exactly inside the 34px circular button;
+        # the previous 19px canvas could land on a half-pixel offset.
+        apply_icon(self.attach_button, "plus", palette["fg_sub"], 20)
         self.effort_combo.set_theme(theme)
         apply_icon(
             self.thinking_button,
@@ -734,10 +739,10 @@ class MainWindow(QMainWindow):
     def _build_header(self, parent_layout: QVBoxLayout) -> None:
         header = QWidget()
         header.setObjectName("chatHeader")
-        header.setFixedHeight(58)
+        header.setFixedHeight(RIGHT_HEADER_HEIGHT)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(20, 8, 16, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*RIGHT_HEADER_MARGINS)
+        layout.setSpacing(RIGHT_HEADER_SPACING)
 
         self.model_combo = RoundedComboBox(self._theme)
         self.model_combo.setObjectName("modelCombo")
@@ -779,7 +784,7 @@ class MainWindow(QMainWindow):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         layout.addSpacing(7)
-        subtitle = QLabel("调用你自己的 DeepSeek API，对话记录仅保存在本机")
+        subtitle = QLabel("调用你自己的DeepSeek_API，对话记录仅保存在本机")
         subtitle.setObjectName("subText")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
@@ -1001,7 +1006,7 @@ class MainWindow(QMainWindow):
             "删除对话",
             (
                 f"确定删除“{conversation.get('title', '该对话')}”吗？\n"
-                "对话消息和本地图片会一起删除。"
+                "对话消息和本地图片会一起删除"
             ),
             self._theme,
         )
@@ -1132,7 +1137,7 @@ class MainWindow(QMainWindow):
         if not text and not staged_images:
             return
         if not (self.cfg.get("api_key") or "").strip():
-            self._show_notice("请先在设置中填写 API 密钥")
+            self._show_notice("请先在设置中填写API密钥")
             self.open_settings()
             return
         if staged_images and not is_vision_model(self.current_model()):
@@ -1240,6 +1245,7 @@ class MainWindow(QMainWindow):
         self._worker = worker
         worker.chunk.connect(self._on_chunk)
         worker.reasoning.connect(self._on_reasoning)
+        worker.status.connect(self._on_status)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_failed)
         worker.finished.connect(lambda: self._clear_worker(worker))
@@ -1267,6 +1273,13 @@ class MainWindow(QMainWindow):
         if isValid(context.bubble):
             context.bubble.set_reasoning(context.reasoning)
             self.chat_view.message_updated(context.bubble)
+
+    def _on_status(self, text: str) -> None:
+        context = self._context
+        if context is None:
+            return
+        if isValid(context.bubble):
+            context.bubble.set_status(text)
 
     def _assistant_record(self, context: StreamContext) -> dict:
         return {

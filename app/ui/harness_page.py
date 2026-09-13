@@ -161,12 +161,27 @@ class HarnessSurface(QWidget):
         return view
 
     def _load_url(self, view: QWebEngineView, url: str) -> None:
+        # Harness authenticates each loopback server instance with a cookie
+        # whose name is derived from the server's random port.  Persisting
+        # those cookies across launches leaves one stale auth cookie per
+        # restart; the resulting Cookie header can make the plugin bundle
+        # request fail before the UI is bootstrapped.  This profile is private
+        # to Harness, so starting a new page with a clean cookie jar is safe.
+        if self._profile is not None:
+            self._profile.cookieStore().deleteAllCookies()
         view.load(QUrl(url))
 
     def _ensure_web_view(self, url: str) -> QWebEngineView:
         if self._web_view is not None:
             return self._web_view
         self._profile = QWebEngineProfile("deepseek-harness-desktop", self)
+        # Do not restore the old on-disk dsh-auth-* cookies.  They are bound
+        # to a previous random loopback port and are not reusable by a new
+        # Harness runtime.  Keeping the profile session-only also prevents
+        # the same accumulation from recurring after this upgrade.
+        self._profile.setPersistentCookiesPolicy(
+            QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies
+        )
         browser_dir = harness_home() / "browser"
         browser_dir.mkdir(parents=True, exist_ok=True)
         self._profile.setPersistentStoragePath(str(browser_dir))
@@ -355,9 +370,9 @@ class HarnessPage(QWidget):
             self.surface.show_web(self.runtime.url)
             return
         if not silent:
-            self.surface.show_status("正在准备官方 Harness（首次启动会下载运行包）…")
+            self.surface.show_status("正在准备官方Harness(首次启动会下载运行包)......")
             self.surface.set_detail(
-                "Harness 是开发者预览版，会执行模型生成的工具和命令；请只授予必要的项目目录权限。"
+                "Harness是开发者预览版，会执行模型生成的工具和命令；请只授予必要的项目目录权限"
             )
         working_directory = self._working_directory()
         self.runtime.start(working_directory)
@@ -445,7 +460,7 @@ class HarnessPage(QWidget):
         self._pending_url = None
         self.surface.show_status(message, failed=True)
         self.surface.set_detail(
-            "可查看官方文档，确认 Node.js 22.19+ / 24+、网络和 API 密钥后再次启动。"
+            "可查看官方文档，确认Node.js22.19+/24+、网络和API密钥后再次启动"
         )
 
     def apply_theme(self, theme: str) -> None:
