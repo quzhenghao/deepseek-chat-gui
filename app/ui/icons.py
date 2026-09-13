@@ -89,6 +89,16 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
     elif name == "arrow-down":
         painter.drawLine(QPointF(12, 5.5), QPointF(12, 18.5))
         painter.drawPath(_path([(6.8, 13.5), (12, 18.7), (17.2, 13.5)]))
+    elif name == "expand":
+        painter.drawPath(_path([(5, 10), (5, 5), (10, 5)]))
+        painter.drawLine(QPointF(5, 5), QPointF(10, 10))
+        painter.drawPath(_path([(14, 19), (19, 19), (19, 14)]))
+        painter.drawLine(QPointF(14, 14), QPointF(19, 19))
+    elif name == "collapse":
+        painter.drawPath(_path([(5, 10), (10, 10), (10, 5)]))
+        painter.drawLine(QPointF(5, 5), QPointF(10, 10))
+        painter.drawPath(_path([(14, 19), (14, 14), (19, 14)]))
+        painter.drawLine(QPointF(14, 14), QPointF(19, 19))
     elif name == "stop":
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)

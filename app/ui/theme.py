@@ -351,6 +351,13 @@ QToolButton {{
 QToolButton:hover {{ color: {c['fg']}; background: {c['hover']}; }}
 QToolButton:pressed {{ background: {c['selected']}; }}
 QToolButton:disabled {{ color: {c['fg_muted']}; }}
+QToolButton#expandInputBtn {{
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+}}
+QToolButton#expandInputBtn:hover {{ background: {c['hover']}; }}
 QToolButton#actionBtn {{
     background: {c['accent']};
     border-radius: 18px;

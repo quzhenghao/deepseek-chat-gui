@@ -81,18 +81,32 @@ from .theme import (
 class ChatTextEdit(QTextEdit):
     submitRequested = Signal()
     imagePasted = Signal(object)
+    expandedChanged = Signal(bool)
+
+    COLLAPSED_HEIGHT = 42
+    EXPANDED_HEIGHT = COLLAPSED_HEIGHT * 3
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("chatInput")
         self.setAcceptDrops(False)
         self.setAcceptRichText(False)
-        self.setMinimumHeight(42)
-        self.setMaximumHeight(138)
+        self.setFixedHeight(self.COLLAPSED_HEIGHT)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._ime_active = False
-        self.document().contentsChanged.connect(self._fit_height)
-        self._fit_height()
+        self._expanded = False
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool) -> None:
+        if self._expanded == expanded:
+            return
+        self._expanded = expanded
+        self.setFixedHeight(
+            self.EXPANDED_HEIGHT if expanded else self.COLLAPSED_HEIGHT
+        )
+        self.expandedChanged.emit(expanded)
 
     def event(self, event) -> bool:
         if event.type() == QEvent.Type.InputMethod:
@@ -147,11 +161,6 @@ class ChatTextEdit(QTextEdit):
             text += "，或拖入图片"
         self.setPlaceholderText(text)
 
-    def _fit_height(self) -> None:
-        document_height = int(self.document().size().height())
-        self.setFixedHeight(min(138, max(42, document_height + 10)))
-
-
 class InputPanel(QWidget):
     filesDropped = Signal(list)
     attachRequested = Signal()
@@ -201,7 +210,20 @@ class InputPanel(QWidget):
 
         self.editor = editor
         self.editor.textChanged.connect(self._update_action)
-        card_layout.addWidget(self.editor)
+        editor_row = QHBoxLayout()
+        editor_row.setSpacing(2)
+        editor_row.addWidget(self.editor, 1)
+        self.expand_button = QToolButton()
+        self.expand_button.setObjectName("expandInputBtn")
+        self.expand_button.setFixedSize(28, 28)
+        self.expand_button.setCheckable(True)
+        self.expand_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.expand_button.toggled.connect(self.editor.set_expanded)
+        self.expand_button.toggled.connect(self._refresh_expand_button)
+        editor_row.addWidget(
+            self.expand_button, 0, Qt.AlignmentFlag.AlignTop
+        )
+        card_layout.addLayout(editor_row)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(5)
@@ -271,6 +293,17 @@ class InputPanel(QWidget):
         self._shadow = shadow
         self.apply_theme(theme)
         self._update_action()
+
+    def _refresh_expand_button(self) -> None:
+        palette = colors(self._theme)
+        expanded = self.expand_button.isChecked()
+        apply_icon(
+            self.expand_button,
+            "collapse" if expanded else "expand",
+            palette["fg_sub"],
+            17,
+        )
+        self.expand_button.setToolTip("收起输入框" if expanded else "展开输入框")
 
     def current_effort(self) -> str:
         return str(self.effort_combo.currentData() or "high")
@@ -402,6 +435,7 @@ class InputPanel(QWidget):
         # An even icon canvas centers exactly inside the 34px circular button;
         # the previous 19px canvas could land on a half-pixel offset.
         apply_icon(self.attach_button, "plus", palette["fg_sub"], 20)
+        self._refresh_expand_button()
         self.effort_combo.set_theme(theme)
         apply_icon(
             self.thinking_button,
@@ -461,7 +495,9 @@ class ChatWorkspace(QWidget):
         stack.setParent(self)
         panel.setParent(self)
         stack.currentChanged.connect(lambda _index: self._sync_layout())
-        panel.editor.textChanged.connect(self._sync_layout)
+        panel.editor.expandedChanged.connect(
+            lambda _expanded: QTimer.singleShot(0, self._sync_layout)
+        )
         panel.image_strip.imagesChanged.connect(self._sync_layout)
         chat_view.followChanged.connect(lambda _enabled: self._sync_follow_button())
         self.follow_button.clicked.connect(chat_view.resume_follow)
@@ -500,12 +536,15 @@ class ChatWorkspace(QWidget):
         width = max(0, self.width())
         height = max(0, self.height())
         self._stack.setGeometry(0, 0, width, height)
+        panel_layout = self._panel.layout()
+        if panel_layout is not None:
+            panel_layout.activate()
         panel_height = min(height, max(132, self._panel.sizeHint().height()))
         self._panel.setGeometry(0, 0, width, panel_height)
 
         is_welcome = self._stack.currentWidget() is self._welcome
         if is_welcome:
-            panel_y = max(0, int(height * 0.60))
+            panel_y = max(0, min(int(height * 0.60), height - panel_height))
             if self._chat_view is not None:
                 self._chat_view.set_composer_clearance(0)
                 self._chat_view.set_bottom_inset(18)
