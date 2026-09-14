@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
+    QSpacerItem,
     QSplitter,
     QStackedWidget,
     QTextEdit,
@@ -68,6 +70,7 @@ from .sidebar import ProductModeSelector, Sidebar
 from .harness_page import HarnessPage
 from .theme import (
     RAIL_SIDEBAR_WIDTH,
+    MESSAGE_CONTENT_MAX_WIDTH,
     RIGHT_HEADER_HEIGHT,
     RIGHT_HEADER_MARGINS,
     RIGHT_HEADER_SPACING,
@@ -82,8 +85,9 @@ class ChatTextEdit(QTextEdit):
     submitRequested = Signal()
     imagePasted = Signal(object)
     expandedChanged = Signal(bool)
+    heightChanged = Signal()
 
-    COLLAPSED_HEIGHT = 42
+    COLLAPSED_HEIGHT = 84
     EXPANDED_HEIGHT = COLLAPSED_HEIGHT * 3
 
     def __init__(self, parent=None) -> None:
@@ -95,6 +99,11 @@ class ChatTextEdit(QTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._ime_active = False
         self._expanded = False
+        self._height_animator = FrameAnimator(280, self)
+        self._height_animator.valueChanged.connect(self._apply_animated_height)
+        self._height_animator.finished.connect(
+            lambda: QTimer.singleShot(0, self.heightChanged.emit)
+        )
 
     def is_expanded(self) -> bool:
         return self._expanded
@@ -103,10 +112,18 @@ class ChatTextEdit(QTextEdit):
         if self._expanded == expanded:
             return
         self._expanded = expanded
-        self.setFixedHeight(
-            self.EXPANDED_HEIGHT if expanded else self.COLLAPSED_HEIGHT
+        self._height_animator.stop()
+        self._height_animator.start(
+            self.height(),
+            self.EXPANDED_HEIGHT if expanded else self.COLLAPSED_HEIGHT,
         )
         self.expandedChanged.emit(expanded)
+
+    def _apply_animated_height(self, height: float) -> None:
+        target = round(height)
+        if target != self.height():
+            self.setFixedHeight(target)
+            self.heightChanged.emit()
 
     def event(self, event) -> bool:
         if event.type() == QEvent.Type.InputMethod:
@@ -197,7 +214,7 @@ class InputPanel(QWidget):
 
         self.card = QFrame()
         self.card.setObjectName("composerCard")
-        self.card.setMaximumWidth(760)
+        self.card.setMaximumWidth(MESSAGE_CONTENT_MAX_WIDTH + 60)
         self.card.setMinimumWidth(480)
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(14, 10, 10, 9)
@@ -488,9 +505,7 @@ class ChatWorkspace(QWidget):
         stack.setParent(self)
         panel.setParent(self)
         stack.currentChanged.connect(lambda _index: self._sync_layout())
-        panel.editor.expandedChanged.connect(
-            lambda _expanded: QTimer.singleShot(0, self._sync_layout)
-        )
+        panel.editor.heightChanged.connect(self._sync_layout)
         panel.image_strip.imagesChanged.connect(self._sync_layout)
         chat_view.followChanged.connect(lambda _enabled: self._sync_follow_button())
         self.follow_button.clicked.connect(chat_view.resume_follow)
@@ -537,7 +552,15 @@ class ChatWorkspace(QWidget):
 
         is_welcome = self._stack.currentWidget() is self._welcome
         if is_welcome:
-            panel_y = max(0, min(int(height * 0.60), height - panel_height))
+            panel_y = max(0, min(int(height * 0.59), height - panel_height))
+            welcome_layout = self._welcome.layout()
+            if welcome_layout is not None:
+                left, top, right, bottom = welcome_layout.getContentsMargins()
+                clearance = max(10, height - panel_y + 4)
+                if bottom != clearance:
+                    welcome_layout.setContentsMargins(
+                        left, top, right, clearance
+                    )
             if self._chat_view is not None:
                 self._chat_view.set_composer_clearance(0)
                 self._chat_view.set_bottom_inset(18)
@@ -620,7 +643,7 @@ class MainWindow(QMainWindow):
         self._warm_start_armed = bool(cfg.get("harness_warm_start", True))
         self._warm_start_pending = False
         self._sidebar_collapsed = False
-        self._sidebar_animator = FrameAnimator(230, self)
+        self._sidebar_animator = FrameAnimator(300, self)
         self._sidebar_animator.valueChanged.connect(self._apply_sidebar_width)
         self._sidebar_animator.finished.connect(self._finish_sidebar_transition)
         self._hover_tips = HoverTipManager(app, self._theme, self)
@@ -713,6 +736,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.chat_view)
 
         self.chat_input = ChatTextEdit()
+        self.chat_input.expandedChanged.connect(self._set_welcome_compact)
         self.input_panel = InputPanel(
             self.chat_input,
             bool(self.cfg.get("deep_thinking", True)),
@@ -830,9 +854,13 @@ class MainWindow(QMainWindow):
         subtitle.setObjectName("subText")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
-        layout.addSpacing(26)
+        self.welcome_suggestion_gap = QSpacerItem(
+            0, 26, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
+        layout.addItem(self.welcome_suggestion_gap)
 
         suggestions = QWidget()
+        self.welcome_suggestions = suggestions
         suggestions.setMaximumWidth(620)
         grid = QGridLayout(suggestions)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -858,6 +886,16 @@ class MainWindow(QMainWindow):
         layout.addLayout(center)
         layout.addStretch(5)
         return page
+
+    def _set_welcome_compact(self, expanded: bool) -> None:
+        self.welcome_suggestions.setVisible(not expanded)
+        self.welcome_suggestion_gap.changeSize(
+            0,
+            0 if expanded else 26,
+            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.welcome.layout().invalidate()
 
     def show_welcome(self) -> None:
         self.chat_workspace.set_page(self.welcome)
@@ -952,12 +990,17 @@ class MainWindow(QMainWindow):
         target = RAIL_SIDEBAR_WIDTH if collapsed else SIDEBAR_DEFAULT_WIDTH
         if collapsed:
             self.sidebar.setMinimumWidth(RAIL_SIDEBAR_WIDTH)
+        else:
+            # Reveal the full page while it is still clipped by the narrow
+            # sidebar, instead of swapping pages halfway through the motion.
+            self.sidebar.set_collapsed(False)
         self._sidebar_animator.stop()
         start = self.sidebar.width() or SIDEBAR_DEFAULT_WIDTH
         if not animate or start == target:
             self._apply_sidebar_width(target)
             self._finish_sidebar_transition()
             return
+        self.chat_view.set_layout_transition_active(True)
         self._sidebar_animator.start(start, target)
 
     def _apply_sidebar_width(self, width: float) -> None:
@@ -968,14 +1011,16 @@ class MainWindow(QMainWindow):
         value = int(round(width))
         value = max(RAIL_SIDEBAR_WIDTH, min(SIDEBAR_DEFAULT_WIDTH, value))
         self.splitter.setSizes([value, max(0, total - value)])
-        self.sidebar.set_collapsed(value <= RAIL_SIDEBAR_WIDTH + 64)
 
     def _finish_sidebar_transition(self) -> None:
         if self._sidebar_collapsed:
             self._apply_sidebar_width(RAIL_SIDEBAR_WIDTH)
+            self.sidebar.set_collapsed(True)
+            self.chat_view.set_layout_transition_active(False)
             return
         self._apply_sidebar_width(SIDEBAR_DEFAULT_WIDTH)
         self.sidebar.setMinimumWidth(SIDEBAR_MIN_WIDTH)
+        self.chat_view.set_layout_transition_active(False)
 
     def refresh_sidebar(self, selected: str | None = None) -> None:
         current = selected if selected is not None else self._current_conversation_id

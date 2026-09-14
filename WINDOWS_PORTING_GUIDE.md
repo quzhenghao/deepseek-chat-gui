@@ -4,7 +4,7 @@
 
 ## 0. 基线、范围与实施原则
 
-- 分析基线：[本仓库 `main` 源码](https://github.com/quzhenghao/deepseek-chat-gui/tree/main)，版本 `app/__init__.py::__version__ == "1.0.0"`。2026-09-13 的 macOS 后续修复包含输入框固定高度、选字滚动和多会话并行；开始移植时先记录 `git rev-parse HEAD` 并核对远端，再按实际提交差异重做风险盘点，不直接套用旧行号。
+- 分析基线：[本仓库 `main` 源码](https://github.com/quzhenghao/deepseek-chat-gui/tree/main)，版本 `app/__init__.py::__version__ == "1.0.0"`。2026-09-14 的 macOS 后续修复包含输入框 84/252 高度、可中断的流式跟随、平滑展开和多会话并行；开始移植时先记录 `git rev-parse HEAD` 并核对远端，再按实际提交差异重做风险盘点，不直接套用旧行号。
 - `v1.0.0` Release 的同名 macOS DMG 是后续修复构建，标签仍指向初始发布提交 `7df1d7f`。Windows 移植须从最新 `main` 获取源码，不能以 Release 标签或 DMG 中的源码版本号推断功能提交已包含在克隆中。
 - 本说明书以移植开始时 `main` 的 **Git 跟踪文件**为准；本机忽略的供应产物和未提交改动不会随 GitHub 克隆到 Windows。Windows 助手应先确认自己克隆的提交和工作树，再对照本说明书实施。
 - 主目标：Windows 10/11 **x64** 原生运行和原生打包。Windows ARM64 应作为另一个独立构建/验收目标，不能把 x64 包改名为 ARM64 包；若目标电脑是 ARM64，先核对 PySide6、PyInstaller、Node 和 Harness 原生依赖的对应 wheel/包，再建立同等测试矩阵。
@@ -14,7 +14,7 @@
 
 ### 功能等价合同
 
-必须保留：API Key/自定义地址与模型同步；Chat SSE 流式输出、取消生成、思考折叠和 Low/High/Max；**每个会话独立 `ChatWorker`，多个会话可同时输出，切换历史或新建对话不取消其他会话；运行中的输入框可提前键入下一轮内容，切换后按会话恢复未发送文字、光标和待发送图片；侧栏用与思考区同源的旋转指示器标记仍在执行的会话**；**Chat 输入框普通 42 逻辑像素、展开 126 逻辑像素的固定两档高度、右上角矢量切换按钮及两档内部纵向滚动，输入、删除、发送与新对话均不因文本长度改变所选高度**；联网搜索函数调用、引用和来源链接；图片选择/拖入/粘贴、8 张上限、32 MiB 上限、历史持久化与原图打开；Markdown、代码复制、表格、链接、离线 KaTeX（公式、矩阵、长公式滚动）；新对话、历史标题、重命名、单项/批量删除和媒体清理；浅色/深色主题、系统提示词、设置验证；Chat/Harness 切换、**仅预热 Harness 本地服务、用户切换时才创建并加载 WebEngine 页面**、项目目录、官方 Harness 页面及其工作区、工具、终端、审批和轨迹；退出时关闭属于本应用的进程。官方 Harness 版本是开发者预览，实际服务端能力仍以固定包和用户账号为准，不把外部服务变动误判成桌面移植成功或失败。
+必须保留：API Key/自定义地址与模型同步；Chat SSE 流式输出、取消生成、思考折叠和 Low/High/Max；**每个会话独立 `ChatWorker`，多个会话可同时输出，切换历史或新建对话不取消其他会话；运行中的输入框可提前键入下一轮内容，切换后按会话恢复未发送文字、光标和待发送图片；侧栏用与思考区同源的旋转指示器标记仍在执行的会话**；**Chat 输入框普通 84 逻辑像素、展开 252 逻辑像素的两档目标高度、约 60fps 非线性展开/收起、右上角矢量切换按钮及两档内部纵向滚动，输入、删除、发送与新对话均不因文本长度改变所选高度**；联网搜索函数调用、引用和来源链接；图片选择/拖入/粘贴、8 张上限、32 MiB 上限、历史持久化与原图打开；Markdown、代码复制、表格、链接、离线 KaTeX（公式、矩阵、长公式滚动）；新对话、历史标题、重命名、单项/批量删除和媒体清理；浅色/深色主题、系统提示词、设置验证；Chat/Harness 切换、**仅预热 Harness 本地服务、用户切换时才创建并加载 WebEngine 页面**、项目目录、官方 Harness 页面及其工作区、工具、终端、审批和轨迹；退出时关闭属于本应用的进程。官方 Harness 版本是开发者预览，实际服务端能力仍以固定包和用户账号为准，不把外部服务变动误判成桌面移植成功或失败。
 
 ## 1. 仓库结构与依赖结论
 
@@ -23,13 +23,13 @@
 | 入口 | `main.py` | PySide6 `QApplication`，显式 `Fusion` 样式、PNG 窗口图标；可跨平台。窗口/任务栏图标及 DPI 要在 Windows 实测。 |
 | 路径 | `app/__init__.py`, `app/config.py`, `app/storage.py`, `app/diagnostics.py` | `sys._MEIPASS` 资源定位；用户目录为 `~/.deepseek_chat_gui`，JSON 以 `.tmp` 原子替换，媒体当前存**绝对路径**。Windows 新数据可工作，跨电脑搬运旧媒体需单独迁移。 |
 | API | `app/api.py`, `app/worker.py` | `requests` 流式请求、搜索、标题后台线程，主体无 POSIX API；DuckDuckGo/网页读取的 User-Agent 写死为 Macintosh，需调整与回归。 |
-| Chat UI | `app/ui/main_window.py`, `sidebar.py`, `message_bubbles.py`, `settings_dialog.py`, `controls.py`, `icons.py`, `image_strip.py` | `MainWindow._streams` 按会话 ID 管理流式任务，界面切换只重建可见气泡；`_drafts` 在应用运行期间保存每个会话的未发送输入，关闭应用不承诺草稿持久化。侧栏复用 `ThinkingIndicator`。悬浮输入区使用固定 42/126 逻辑像素的可滚动编辑器；外层 composer 仅在展开切换或图片条变化时重排。另有大量固定宽高、绝对定位、透明弹窗/菜单和 Mac 字体假设；Windows 字体、缩放、低逻辑分辨率仍是主要视觉风险。 |
+| Chat UI | `app/ui/main_window.py`, `sidebar.py`, `message_bubbles.py`, `settings_dialog.py`, `controls.py`, `icons.py`, `image_strip.py` | `MainWindow._streams` 按会话 ID 管理流式任务，界面切换只重建可见气泡；`_drafts` 在应用运行期间保存每个会话的未发送输入，关闭应用不承诺草稿持久化。侧栏复用 `ThinkingIndicator`。悬浮输入区使用固定 84/252 逻辑像素的可滚动编辑器；外层 composer 在展开动画每帧和图片条变化时同步重排。另有大量固定宽高、绝对定位、透明弹窗/菜单和 Mac 字体假设；Windows 字体、缩放、低逻辑分辨率仍是主要视觉风险。 |
 | 富文本 | `app/markdown.py`, `app/ui/message_bubbles.py` | 普通文字用 `QTextBrowser`，公式和代码块用 `QWebEngineView + QWebChannel + KaTeX`；Windows 需验 `file:///C:/...` 基准 URL、WebEngine 进程/资源/字体、滚动和复制。`app/markdown.py` 已有 Consolas 分支。 |
 | Harness | `app/harness.py`, `app/ui/harness_page.py`, `app/ui/main_window.py` | 启动官方 `@deepseek-ai/dsh@0.1.5-rc.1` 的 `dsh web`，loopback token URL 嵌入 WebEngine。`warm()` 只启动本地服务，页面仅在切到 Harness 后创建；须保留此顺序。Node 路径、`npx`、Unix 进程组及 `ps/lsof/killpg` 清理在 Windows 必改。 |
 | Python 依赖 | `requirements.txt`: `PySide6>=6.8,<7`, `requests>=2.31,<3`, `markdown-it-py>=3,<5`; `requirements-dev.txt`: `pyinstaller>=6.11,<7`, `ruff>=0.6,<1` | 使用 Windows x64 CPython 3.11 建隔离环境，完成第一次通过后记录实际解析版本并锁定构建环境。PySide6 的 Qt WebEngine、Qt Network、Qt WebChannel、Qt SVG/图像插件必须实际导入/打包核验。 |
 | 资源 | `assets/app-icon.png`（1024²）、`assets/app-icon.icns`、SVG、`assets/vendor/katex/{katex.min.js,katex.min.css,fonts/*.woff2,LICENSE}` | PNG/内置 KaTeX 可跨平台；`.icns` 不可当 Windows 可执行文件图标，应从 PNG 生成多尺寸 `.ico`。KaTeX 字体和 QSS SVG 要随包保留。 |
 | 构建 | `DeepSeekChat.spec`, `scripts/*.sh`, `.gitignore`, `README.md`, `CHANGELOG.md`, `update.md` | `.spec` 无条件创建 `BUNDLE`、使用 `.icns`；脚本使用 bash、Darwin tarball、codesign、hdiutil 和 DMG。需要独立 Windows 供应/打包/发布路径和文档。 |
-| 测试 | README 声称 `tests/`；**`.gitignore` 明确忽略 `tests/`** | GitHub 新克隆仍没有测试目录。本机忽略的 `tests/test_ui.py` 含预热和多会话并行回归用例，但不会随克隆交付；Windows 分支需把测试纳入 Git，撤销这一忽略规则，建立真实的 CI/本机验收。 |
+| 测试 | `tests/` 已纳入 Git | 源码克隆包含 API、存储、Markdown、Qt 与 WebEngine 回归。Windows 仍须补平台进程、路径、桌面视觉和干净机验收；CI 要防止零测试假通过。 |
 
 当前本机已有的、被 Git 忽略的 `vendor/harness/` 是 **Darwin arm64** 供应结果，内有 `@vscode/ripgrep-darwin-arm64`、`@img/sharp-darwin-arm64`、`@koromix/koffi-darwin-arm64` 等，不能复制到 Windows；`node-pty` 虽带多平台预编译 `.node`，其余 optional/native 包仍按安装平台选择。顶层 `dsh@0.1.5-rc.1` 使用 `^` 版本的传递依赖，本机供应树实际出现 `0.1.5-rc.2`，所以“顶层固定”并不等于整树可复现。Windows 供应必须在 Windows 上建立并提交 `package-lock.json`，再用 `npm ci`。可核对 [npm 官方包元数据](https://registry.npmjs.org/%40deepseek-ai%2Fdsh/0.1.5-rc.1) 和 [官方 Harness 仓库](https://github.com/deepseek-ai/deepseek-harness)。
 
@@ -84,14 +84,23 @@ New-Item -ItemType Directory -Force -Path $env:DEEPSEEK_CHAT_GUI_HOME | Out-Null
 | `app/ui/theme.py` | `FONT_STACK`（约 86 行）现为 `.AppleSystemUIFont` / Helvetica Neue / PingFang SC。在 Windows 分支使用可解析的 Segoe UI + Microsoft YaHei UI/等价 CJK 字体，并用 `QFontMetrics` 看真实宽度；`QComboBox`/`QSpinBox`/复选框的 `image: url(...)` 需把 SVG 路径构造为经 Qt 编码的本地 URL（尤其是 `C:`、空格、中文路径），验证下拉箭头、上下箭头、勾号全部显示。保留 Fusion 和颜色、间距的设计意图。 |
 | `app/ui/controls.py` | `build_flat_menu`、`RoundedComboBox`、`ConfirmationDialog`、`NoticeDialog`、`HoverTipWidget` 在 Windows 下实测 `WA_TranslucentBackground`、frameless、mask 的圆角和阴影。若透明窗口呈黑角/黑底、菜单被截或无法点中，只对 Windows 做 QSS/窗口 flag 的针对性修正；保留右键不取消消息选区、Escape 关闭、键盘导航。 |
 | `app/ui/main_window.py::MainWindow`, `sidebar.py::ConversationItem` | 保留会话 ID → `StreamContext`/`ChatWorker` 的映射，不退回单一 `_worker` 或切换即 `cancel()`。Qt 工作线程只产生信号，主线程按所属会话更新上下文与存储；只有会话仍是当前可见页且气泡有效时才操作 Qt 控件。切换时先断开旧气泡引用再清空消息视图，返回时从已存历史和内存中的未完片段重建。完成/失败的后台回调必须归属原会话，清除对应侧栏旋转状态；无正文失败用 `role=error` 保存在历史中且不得传入后续 API 上下文。新对话不停止旧线程，同一会话生成中暂缓发送但保留预输入；删除会话只取消该会话，退出时取消并等待全部 Chat/标题线程。`ThinkingIndicator` 要在侧栏重建、浅深主题、高 DPI、选中/悬停和批量模式下可见且不留下运行的旧定时器。 |
-| `app/ui/main_window.py`, `sidebar.py`, `settings_dialog.py` | `MainWindow.setMinimumSize(920,640)`、侧栏 280/56、输入卡最小 480、设置侧栏 280，以及欢迎页 composer 的 60% 悬浮定位，在 Windows 125%/150% 时可能超过实际逻辑工作区。当前欢迎页已按 composer 高度把 y 夹在可见范围；移植时仍须验证普通/展开两档、图片条同时出现及低逻辑分辨率。先通过 `QScreen.availableGeometry()` 决定初始窗口大小；为小逻辑视口建立紧凑布局：Chat 侧栏自动折叠到 56px rail（区分用户主动折叠状态），输入卡放弃固定 480 下限并在剩余宽度内缩放，设置侧栏/表单在窄宽度下收缩或换行、内容继续可滚。所有控件仍可达到，不能通过隐藏功能解决溢出。窗口移到不同 DPI 显示器时重新计算布局。Qt 6 使用设备独立像素；缩放策略只有在实测确需时才在创建 `QApplication` 前设置，不在发布脚本中强制 `QT_SCALE_FACTOR`。[Qt High DPI 说明](https://doc.qt.io/qt-6/highdpi.html)、[缩放取整策略](https://doc.qt.io/qt-6/qguiapplication.html)。 |
-| `app/ui/main_window.py::ChatTextEdit`, `app/ui/icons.py`, `app/ui/theme.py` | 保留普通 42、展开 126 逻辑像素的固定编辑器高度与 `ScrollBarAsNeeded`；长段落、无空格长串和多行粘贴都必须在编辑器 viewport 内换行或滚动，不得撑高卡片或盖住工具栏。展开/收起图标由 `icons.py` 矢量绘制，按钮在编辑器右上角可点击、可键盘聚焦，深浅色与高 DPI 下可辨。编辑器文本变化只更新发送状态；外层 composer 布局在切换高度和图片条变化后同步，聊天消息 viewport 底部净空跟随实际卡片高度。输入、删除、发送清空、新对话、历史切换后保持用户所选高度；若窗口逻辑高度不足，仍须让工具栏和提示可达。 |
+| `app/ui/main_window.py`, `sidebar.py`, `settings_dialog.py` | `MainWindow.setMinimumSize(920,640)`、侧栏 280/56、输入卡最小 480、设置侧栏 280，以及欢迎页 composer 的 59% 悬浮定位，在 Windows 125%/150% 时可能超过实际逻辑工作区。当前欢迎页已按 composer 高度把 y 夹在可见范围；移植时仍须验证普通/展开两档、图片条同时出现及低逻辑分辨率。先通过 `QScreen.availableGeometry()` 决定初始窗口大小；为小逻辑视口建立紧凑布局：Chat 侧栏自动折叠到 56px rail（区分用户主动折叠状态），输入卡放弃固定 480 下限并在剩余宽度内缩放，设置侧栏/表单在窄宽度下收缩或换行、内容继续可滚。所有控件仍可达到，不能通过隐藏功能解决溢出。窗口移到不同 DPI 显示器时重新计算布局。Qt 6 使用设备独立像素；缩放策略只有在实测确需时才在创建 `QApplication` 前设置，不在发布脚本中强制 `QT_SCALE_FACTOR`。[Qt High DPI 说明](https://doc.qt.io/qt-6/highdpi.html)、[缩放取整策略](https://doc.qt.io/qt-6/qguiapplication.html)。 |
+| `app/ui/main_window.py::ChatTextEdit`, `app/ui/icons.py`, `app/ui/theme.py` | 保留普通 84、展开 252 逻辑像素的编辑器目标高度与 `ScrollBarAsNeeded`；长段落、无空格长串和多行粘贴都必须在编辑器 viewport 内换行或滚动，不得撑高卡片或盖住工具栏。展开/收起图标由 `icons.py` 矢量绘制，按钮在编辑器右上角可点击、可键盘聚焦，深浅色与高 DPI 下可辨。编辑器文本变化只更新发送状态；点击展开/收起后以 16 ms 精确定时器和非线性缓动逐帧改变高度，外层 composer 与聊天 viewport 底部净空逐帧跟随，最终值分别精确回到 84/252。图片条变化后也同步布局。输入、删除、发送清空、新对话、历史切换后保持用户所选高度；若窗口逻辑高度不足，仍须让工具栏和提示可达。 |
+| `app/ui/theme.py::MESSAGE_CONTENT_MAX_WIDTH`, `message_bubbles.py::UserBubble` | 当前输入框可见编辑区域、AI 正文区域、用户气泡正文在宽视口下共用 **820 逻辑像素**的最大排版宽度；输入卡外宽约 880，气泡外框加各自内边距。用户短句用实际显示字体的行宽计算自然宽度，不能以允许汉字断行的 `QTextDocument.idealWidth()` 估算，否则短消息也会换行。窄窗口按可用聊天栏缩小，不允许固定用户气泡宽度超出 viewport；在 Windows 中英混排、emoji、标点、链接、长无空格字符串和 100%–200% DPI 下验证。 |
 | `app/ui/main_window.py::ChatTextEdit.insertFromMimeData` | 现在仅接收 `QImage`，Windows 截图工具/剪贴板可能给 `QPixmap` 或文件 URL。分别处理有效 `QImage`、`QPixmap.toImage()`、受支持的本地文件 URL；保留纯文本和 `Enter`/`Shift+Enter`/IME 预编辑行为。验证中文微软拼音的候选确认不会误发送。拖入文件仍只接受视觉模型，路径含空格/中文。 |
 | `app/ui/image_strip.py`, `message_bubbles.py::OpenImageLabel` | `rounded_thumbnail` 当前按逻辑 `size×size` 画一次，再由高 DPI 屏放大；依实际 `devicePixelRatio` 生成足够像素、设置 pixmap DPR，保留抗锯齿圆角/内侧描边。验证 PNG/JPEG/GIF/WebP、8 张排列和原图打开。 |
 | `app/ui/message_bubbles.py::_MathWebView` | 约 422 行把 `f"{KATEX_DIR.resolve()}/"` 传给 `QUrl.fromLocalFile`，Windows 混合反斜杠与斜杠，且可能有中文/空格。用 `QUrl.fromLocalFile` 从规范化**目录**构造末尾 `/` 的 base URL；核实 HTML 中 `katex.min.css`、`katex.min.js`、所有 WOFF2 相对 URL 的实际加载。保持 `qrc:///qtwebchannel/qwebchannel.js` 可用。分式行高、矩阵/分段、公式横滚、代码复制和长回答内部纵滚须在真实 WebEngine 上验，不能只看 HTML 字符串。 |
 | `app/ui/harness_page.py` | `QWebEngineProfile` 的 storage/cache 指向可写的用户目录；设置页/消息外链使用 `QDesktopServices` 打开默认浏览器/图片查看器。检查 Windows 防火墙/代理情况下 loopback Web UI，设置更新后旧 profile/cookie 不复用；代码不能把认证 token 画到截图或发到外网。 |
 | `main.py`, `app/ui/icons.py` | 保留 PNG 窗口图标及矢量绘制图标。为打包 EXE 设置 `.ico`；如 Windows 任务栏显示 Python/默认图标，给此应用设置稳定且独有的 AppUserModelID，并对源码/打包态分别测试任务栏分组、Alt+Tab、开始菜单快捷方式。现有 `icon()` 用 3 倍 DPR 绘制，应在 100%–200% 缩放下检查清晰度，包括输入框右上角的展开/收起图标。 |
 | `app/api.py` | 约 414 与 553 行的 Macintosh User-Agent 仅用于搜索页面请求；改为应用自己的中性标识或合理的平台 UA，保持 DDG Lite 解析/Tavily/页面读取与引用测试。API SSE 核心不需要改平台语义。 |
+
+### 阶段 D.1：流式跟随和动画的原生 Windows 方案
+
+1. **以已显现内容决定可滚动高度。** `RichText` 的普通文本仍用完整 `QTextDocument` 保留 Markdown 格式，但原生控件高度只到最后一个已显现字符所在的行；恢复字符格式时按连续片段批量处理。公式/代码的 WebEngine 页面只报告最后一个已显现字符的底边；`style`、`script`、代码工具栏与 KaTeX 的隐藏语义节点不参与计数。用户看到的首屏不能提前占用完整回答的高度。Windows 上分别用纯文本、连续长段落、代码块、公式和混排实测；对比 `QScrollBar.maximum()` 与已显现正文高度，不能用“透明文字占满页面”模拟键入。Qt 的滚动范围受子控件大小与布局约束，见 [QScrollArea 文档](https://doc.qt.io/qt-6/qscrollarea.html)。
+2. **统一人工滚动优先级。** `ChatView` 的 viewport、内嵌 `QTextBrowser`、WebEngine 转发的滚轮、触控板像素滚动，以及滚动条拖动都须暂停自动跟随。向上、向下都算用户介入；程序自己移动滚动条不得误判成用户操作。继续跟随按钮启动约 16 ms 一帧的加速—减速追赶，目标在回答继续生长时动态更新；按钮点击的同一帧不得直接把 `QScrollBar.value()` 设为 `maximum()`。追赶过程中再次滚轮操作立即取消追赶并保留用户指定视角。原生 Windows Precision Touchpad 要同时测 `pixelDelta`、`angleDelta` 和惯性滚动阶段，避免一次手势先暂停又被后续异步布局重新开启。
+3. **让输入区和侧栏逐帧更新，但避免重复重排正文。** 输入框的 84/252 高度动画由精准 16 ms 定时器驱动非线性缓动，`ChatWorkspace` 每帧用卡片真实高度更新底部净空与继续跟随按钮位置；结束后再同步一次布局，防止最后 1–2 像素丢帧。侧栏 280/56 宽度过渡也用非线性约 60fps 目标，导航页只在过渡起点或终点切换，宽度变化期间暂停富文本气泡逐帧重排，结束时统一按新宽度换行。Windows 的计时器可能因消息循环、WebEngine 绘制和显示器刷新率合并帧；记录真实帧时间与屏幕视频，若仍卡顿，先剖析主线程排版和原生 WebEngine 合成，不能靠缩短动画或隐藏内容掩盖停顿。
+4. **低高度和高 DPI 是新边界。** 252 像素展开档在最小 920×640 逻辑窗口占去更大空间；再叠加图片条、系统标题栏和 150%/200% 缩放，必须确认输入工具栏、发送/停止键、继续跟随键和最后一行正文均可见且可点击。欢迎页居中以实际卡片高度重新定位；展开输入框时收起欢迎页建议按钮，避免它们被高卡片盖住，收起后恢复。DPI 改变、窗口缩窄、侧栏动画中反复点击展开键、流式输出时切换深浅主题，都要验证卡片不盖住消息、滚动条不跳尾、侧栏不闪换页。
+5. **统一输入和输出的最大行宽。** 宽视口下用 `MESSAGE_CONTENT_MAX_WIDTH == 820` 作为三处可见文字区的单一目标：输入编辑器 viewport、AI `RichText`、用户 `RichText` 都实际量到 820 逻辑像素；不能只把三个外框设成同宽，因为它们的内边距、图标与边框不同。用户短句须根据真实字体度量保持单行，长句到 820 才换行；窗口变窄后用户气泡也要缩到可用栏宽。Windows 字体替换、125%/150% DPI、文本插入图片、侧栏运动后重新测几何和断行。
 
 数据层：`app/config.py` 的 `Path.home()/".deepseek_chat_gui"`、`DEEPSEEK_CHAT_GUI_HOME`、`app/storage.py` 的 `Path`/`shutil.copy2` 与 JSON `.replace()` 可以留存；在 Windows 做路径含中文/空格、只读目录、已有 `.tmp`、无权限和重启后持久化测试。当前媒体在 `conversations.json` 里是绝对路径：**Windows 新会话**照旧可用；如果要求把 Mac 旧数据直接拷到 Windows，需增加 `ConversationStore.resolve_media_path()` 及兼容旧记录的迁移：只映射位于旧 `media/<conversation-id>/` 下的文件到新 `MEDIA_DIR`，保留原 JSON 备份且每步校验，更新展示/重发图片用到的 `app/api.py`、`message_bubbles.py` 调用；不要对任意路径做字符串替换，也不要自动删除源数据。此跨设备数据迁移是独立验收场景。
 
@@ -105,7 +114,7 @@ New-Item -ItemType Directory -Force -Path $env:DEEPSEEK_CHAT_GUI_HOME | Out-Null
 
 ## 3. 必须新增且提交的测试
 
-先从 `.gitignore` 删除对 `tests/` 的忽略，再在 Windows 克隆内建立并提交测试；目前 GitHub 仓库**没有跟踪本机的 `tests/test_ui.py`**，所以 Windows 上全新克隆仍找不到该文件。若移植执行者另行取得这份本地测试，可在审阅后迁入；否则要按下表重建同等回归，包括输入框固定高度与多会话并行场景。README 中的旧命令对新克隆会出现“零测试”假通过。测试发现命令应打印预期测试数量，并设零测试为失败。推荐 `python -m unittest discover -s tests -v`；`QT_QPA_PLATFORM=offscreen` 只用于不依赖真实屏幕/WebEngine 合成的 Widget 测试，真实 WebEngine/截图必须在交互式 Windows 桌面跑。
+从已跟踪的 `tests/` 开始运行现有回归，再在 Windows 克隆内补充并提交平台测试。尤其要补 Windows 专有的进程与路径场景，并在真实桌面复验输入框动画、多会话并行和 WebEngine 渲染。测试 runner 要打印实际测试数量，并设零测试为失败。推荐 `python -m unittest discover -s tests -v`；`QT_QPA_PLATFORM=offscreen` 只用于不依赖真实屏幕合成的 Widget 回归，真实 WebEngine 画面和帧率必须在交互式 Windows 桌面检查。
 
 | 测试组 | 最小必测场景与通过条件 |
 | --- | --- |
@@ -113,7 +122,9 @@ New-Item -ItemType Directory -Force -Path $env:DEEPSEEK_CHAT_GUI_HOME | Out-Null
 | 平台路径 | Windows `HARNESS_BUNDLE_DIR`、`node.exe`、CLI 探测；没有系统 Node 时仍正常；只有 `npx.cmd` 时不将其误作普通 exe；Mac 候选路径不进入 Windows 决策；QSS SVG、KaTeX base URL 在 `C:\Work Space\中文\...` 下有效。 |
 | Harness 生命周期 | 以受控测试 Node 子进程模拟 web URL/token 和衍生子进程：ready、退出、超时、端口重试、重复启动/停止、设置变更、关闭应用。检查 Job Object/PID 归属、端口释放，别的 Node/监听端口不受影响。然后用真实内置 Harness 执行项目/终端/工具/审批的人工集成测试。 |
 | Harness 预热与页面时序 | 预热开启且当前在 Chat 时，`warm()` 只调用服务启动；人为发出启动中、ready、failed 信号，再最小化/还原，断言 `HarnessSurface._web_view` 与 `_profile` 仍为空，`show_web`/`show_status` 未更新隐藏页，Chat 当前页不变。切到 Harness 后才调用一次 `show_web`；就绪信号在已选页且窗口最小化时先置 `_surface_pending`，还原后只绘制一次；在设置页选择同一个 Harness 模式，应先恢复 `page_stack` 再绘制。运行中改 API Key/项目设置后应停止旧实例并仅在下次进入时展示新状态。用真实 Windows 桌面补测可见闪烁/白屏。 |
-| Qt Widget UI | `QTest` 验模式切换、侧栏折叠、欢迎/聊天输入位置、设置三页与验证、菜单/确认框、拖入/粘贴、剪贴板、IME、主题。输入框专测普通 42/展开 126 逻辑像素：连续键入、无空格长串、多行粘贴、滚至首尾、逐步删除、全清、发送、新对话和历史切换后两档高度稳定；外层 composer 与消息 viewport 净空同步，展开按钮可点击且图标切换，最小窗口和高 DPI 下无溢出。布局断言用实际 `QFontMetrics`/可见区域，不只比固定坐标。 |
+| Qt Widget UI | `QTest` 验模式切换、侧栏折叠、欢迎/聊天输入位置、设置三页与验证、菜单/确认框、拖入/粘贴、剪贴板、IME、主题。输入框专测普通 84/展开 252 逻辑像素与 16 ms 非线性过渡：连续键入、无空格长串、多行粘贴、滚至首尾、逐步删除、全清、发送、新对话和历史切换后两档高度稳定；外层 composer 与消息 viewport 净空同步，展开按钮可点击且图标切换，最小窗口和高 DPI 下无溢出。布局断言用实际 `QFontMetrics`/可见区域，不只比固定坐标。 |
+| 消息行宽 | 1280×820 及更宽窗口量取输入编辑器、AI 正文、用户正文的实际 viewport，最大宽度均为 820 逻辑像素；短中文/英文/混合消息发送后仍是一行，达到最大宽度后才换行。最小窗口与侧栏展开/收起途中不得水平越界；不同字体和 DPI 下用行布局数量与屏幕截图核对。 |
+| 流式视角与动画 | 用长答案的可控 SSE 在 16 ms、50 ms 和突发大块三种节奏输入：完整文档可很长，但在键入前 10% 时正文控件高度和 `QScrollBar.maximum()` 只对应已显现部分。滚轮上下、触控板、滚动条拖动后保持用户视角；继续跟随首帧不跳底，中途再次干预可中断，完成后到达动态最下方。侧栏与输入框过渡记录中间帧、最终 280/56 与 84/252 尺寸、点击连发后的终态；加入代码/公式 WebEngine 后重复，确认外层滚轮转发与可见高度一致。 |
 | Chat 并行与草稿 | 用两个可控 SSE mock 同时打开 A/B：A 生成中可输入草稿和图片、新建 B 并发生成；A/B 的旋转图标同时持续，来回切换时不发停止请求且各自内容、未发送文字、光标、图片分别恢复。B 在 A 页面完成后仅写 B 的历史并停止 B 图标；A 随后完成，回复不串页；同一会话生成时 Enter 不发送也不清空草稿，结束后可发送。另测单项/批量删除仅取消目标线程、错误与部分输出、标题线程、主题切换和退出时全部线程收束。Windows 用真机重复并发和快速切换，观察 Qt 消息循环及侧栏动画没有明显停顿。 |
 | 真实 WebEngine UI | KaTeX JS/CSS/woff2 成功，公式 DOM、代码块复制、外链路由、长式横滚、长回答尾部可达、反复清空/重建不崩溃；Harness Web UI 的 `loadFinished(true)`、body 非空、同源导航、cookie 清理和重启。 |
 
@@ -136,7 +147,7 @@ $env:DEEPSEEK_CHAT_GUI_HOME = Join-Path (Get-Location) '.tmp/windows-port/test-d
 ### 固定场景与采集
 
 1. 先在隔离数据目录准备**确定性**假数据、假 API 响应；截图不使用真实 Key、Harness token、个人项目路径。等待窗口 show、Qt 事件队列、WebEngine `loadFinished`、`document.fonts.ready`、流式动画进入指定状态后才拍。窗口使用物理屏幕截图或验证可包含 Chromium 子视图的抓取方法；若 `QWidget.grab()` 得到空白 WebEngine，改用 OS 屏幕抓取，不能把空白截图判为通过。
-2. 每组至少保存这些状态：欢迎/首次设置；设置基础、个性化、运行环境（含下拉框和错误提示）；Chat 文本回答、流式思考/已折叠、联网搜索引用；**普通与展开输入框各自输入超长文本、滚动到末尾、删除后恢复空白，以及欢迎页/聊天页的高度**；**A/B 两会话同时执行的侧栏旋转指示、A 输出中已键入下一轮草稿、切到 B 后仍在生成及切回后的草稿和片段**；代码块复制按钮、复杂 KaTeX 与超长公式；图片待发送/发送后、8 图上限；侧栏展开/收起与批量删除确认；深色主题同组关键页；**Chat 可见且 Harness 服务已预热就绪、首次切换 Harness 的加载过程、已就绪/重启失败与工作区、最小化后还原**。仓库 `assets/screenshots/*.png` 给出 1360×900 的结构参照，实际 Windows 截图另存到任务专属验证目录，记录 Qt/Python/Windows/屏幕 DPI/窗口逻辑尺寸。
+2. 每组至少保存这些状态：欢迎/首次设置；设置基础、个性化、运行环境（含下拉框和错误提示）；Chat 文本回答、流式思考/已折叠、联网搜索引用；**普通 84 与展开 252 输入框各自输入超长文本、滚动到末尾、删除后恢复空白，以及欢迎页/聊天页的高度和动画中间帧**；**长回答首屏键入、滚轮暂停、继续跟随追赶、再次滚轮中断，以及含代码/公式时的相同序列**；**A/B 两会话同时执行的侧栏旋转指示、A 输出中已键入下一轮草稿、切到 B 后仍在生成及切回后的草稿和片段**；代码块复制按钮、复杂 KaTeX 与超长公式；图片待发送/发送后、8 图上限；侧栏展开/收起帧序列与批量删除确认；深色主题同组关键页；**Chat 可见且 Harness 服务已预热就绪、首次切换 Harness 的加载过程、已就绪/重启失败与工作区、最小化后还原**。仓库 `assets/screenshots/*.png` 给出 1360×900 的结构参照，实际 Windows 截图另存到任务专属验证目录，记录 Qt/Python/Windows/屏幕 DPI/窗口逻辑尺寸。
 3. 覆盖窗口逻辑尺寸 **1360×900、1280×820、最小支持尺寸**；显示缩放 **100%、125%、150%、200%**（200% 可在高分屏），浅/深主题；至少一次双屏不同 DPI 之间拖动、最大化/还原、窗口缩窄、RDP/重连或分辨率改变。单屏物理工作区不够时记录实际逻辑 `availableGeometry()`，使用另一显示器或 VM，不能靠截掉窗口下部取得“正常”截图。
 4. 运行自动几何扫描：遍历所有**可见且应交互**控件，断言有效 `geometry`、中心点落在相应可见父窗口/滚动 viewport 中；标签用 `QFontMetrics.boundingRect` 或可用高度检出截字；组合框弹层、右键菜单、通知、确认框落在 `screen.availableGeometry()`；滚动区底部控件能通过滚动到达。对 WebEngine 注入只读 JS，检查 `document.readyState`、`typeof katex`、`document.fonts.ready`、公式/代码 DOM 非空、`scrollWidth/clientWidth`、`scrollHeight/clientHeight` 和最后节点可达。
 5. 与 macOS 参考图做**结构性**对照：顶部 Work Type 58 逻辑像素、Chat 侧栏展开约 280/收起 56、右顶栏 58、输入卡居中且不超过设计最大宽度、欢迎页/消息页均留合理可见边距；品牌、图标、按钮、状态、公式、底部 composer 全出现。跨 OS 字体字形与抗锯齿不同，不用整图精确像素相等作门槛。可以对稳定区域做图像差异热图/边框叠加，动态时间、动画、光标、真实 Harness 随版本变的内容单独遮罩；每个差异仍需人工判断。禁止用改图、隐藏控件或大幅放宽容差让失败“变绿”。
@@ -148,7 +159,7 @@ $env:DEEPSEEK_CHAT_GUI_HOME = Join-Path (Get-Location) '.tmp/windows-port/test-d
 - A 生成期间键入 A 的下一轮内容、粘贴图片，切到 B 编辑另一份草稿并发送；再访问 A，核验文字、光标、图片和已流出的正文各归原会话。A/B 同时运行时检查侧栏两处旋转图标持续转动、悬停菜单可用；完成、取消、失败、删除时只清除对应图标。当前 A 未完成时按 Enter 不能覆盖正在执行的 A，也不能丢失预输入。切换 Chat/Harness 或进入设置再返回，两个 Chat 请求仍正常结束。
 - 所有下拉箭头、勾号、SVG Logo、任务栏图标、深浅色文字/背景/选中态；菜单圆角、无黑角、焦点键盘可用、弹层不跑出屏幕。
 - 鼠标拖选普通文字/公式区域、`I` 形光标、右键保留选区、复制/全选/代码复制；点击空白取消选区。链接由默认浏览器打开。
-- 长文本、长代码、表格、矩阵/分式/分段公式的宽高；长公式只在自身横滚，长回答尾部可达；人工上滚后暂停跟随，点击“回到最新消息”继续跟随。
+- 长文本、长代码、表格、矩阵/分式/分段公式的宽高；长公式只在自身横滚，长回答尾部可达；输出首屏不预留未显现正文高度，默认视角随已显现文字逐步下移；触控板/滚轮向上或向下介入后立即暂停，点击“回到最新消息”时逐帧加速追到最新位置，追赶途中再次滚轮介入须立即中断。
 - Harness 服务在 Chat 显示期间预热到 ready/failed、窗口退到后台与最小化还原、首次切换/再次切换、设置页回到同一 Harness 模式、配置更新后重启；记录连续屏幕画面或帧序列以捕捉单帧整窗刷新/缩小后弹回，检查 Chat 在预热期间不变、WebEngine 仅在选中 Harness 后创建、加载后无白屏。首次切换需记录点击到加载状态、页面首帧的时间和最长事件循环停顿，确保新增的前台建页成本不会让窗口长期无响应。继续验官方 Web UI 的项目选择/文件/终端/工具/审批；不把服务启动成功但页面空白当通过。
 
 ## 5. 成品验收与故障定位

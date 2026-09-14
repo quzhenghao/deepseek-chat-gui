@@ -15,6 +15,5 @@ vendor/harness/
 
 # Keep generated and development-only files out of the public repository.
 联网搜索与思考折叠栏技术实现详解.md
-tests/
 assets/app-icon.svg
 assets/vendor/katex/README.md

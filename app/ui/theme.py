@@ -66,6 +66,7 @@ THEMES = {"light": _LIGHT, "dark": _DARK}
 SIDEBAR_DEFAULT_WIDTH = 280
 SIDEBAR_MIN_WIDTH = 220
 RAIL_SIDEBAR_WIDTH = 56
+MESSAGE_CONTENT_MAX_WIDTH = 820
 
 # Keep message surfaces and the image thumbnails inside them on the same
 # corner curve.  The value is in logical Qt pixels and is shared by the

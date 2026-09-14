@@ -60,12 +60,12 @@ from ..markdown import to_html
 from .controls import build_flat_menu
 from .image_strip import rounded_thumbnail
 from .icons import apply_icon, tint_pixmap
-from .theme import CHAT_BUBBLE_RADIUS, colors
+from .theme import CHAT_BUBBLE_RADIUS, MESSAGE_CONTENT_MAX_WIDTH, colors
 
 
 IMAGE_THUMB_SIZE = 160
 IMAGE_GRID_COLUMNS = 3
-LANE_MAX_WIDTH = 840
+LANE_MAX_WIDTH = MESSAGE_CONTENT_MAX_WIDTH + 63
 KATEX_DIR = ASSETS_DIR / "vendor" / "katex"
 
 WEB_SURFACE_TEXTURE_LIMIT = 8192
@@ -110,10 +110,21 @@ _MATH_WEB_SHELL = r"""<!doctype html>
       const root = document.getElementById("content-root");
       let bridge = null;
 
-      const measuredHeight = () => Math.max(
+      const fullHeight = () => Math.max(
         1,
         Math.ceil(root.getBoundingClientRect().height)
       );
+      let revealedCount = 0;
+      const measuredHeight = () => {
+        if (!Number.isFinite(revealLength)) return fullHeight();
+        if (!revealedCount) return 1;
+        const last = revealCharacters[revealedCount - 1];
+        if (!last) return fullHeight();
+        return Math.max(1, Math.ceil(
+          last.getBoundingClientRect().bottom
+          - root.getBoundingClientRect().top + 3
+        ));
+      };
 
       // A very long answer may exceed the maximum safe texture height of the
       // embedded page.  In that case the native surface is intentionally
@@ -154,7 +165,7 @@ _MATH_WEB_SHELL = r"""<!doctype html>
       const shouldSkipReveal = (node) => {
         const element = node.parentElement;
         return element && element.closest(
-          ".code-toolbar, .katex-mathml, .math-source"
+          ".code-toolbar, .katex-mathml, .math-source, style, script"
         );
       };
 
@@ -197,9 +208,16 @@ _MATH_WEB_SHELL = r"""<!doctype html>
               )
             : Math.max(0, Math.floor(revealLength))
           : revealCharacters.length;
-        revealCharacters.forEach((character, index) => {
-          character.style.visibility = index < visible ? "visible" : "hidden";
-        });
+        if (visible > revealedCount) {
+          for (let index = revealedCount; index < visible; index++) {
+            revealCharacters[index].style.visibility = "visible";
+          }
+        } else {
+          for (let index = visible; index < revealedCount; index++) {
+            revealCharacters[index].style.visibility = "hidden";
+          }
+        }
+        revealedCount = visible;
       };
 
       const reportLayout = () => {
@@ -244,9 +262,14 @@ _MATH_WEB_SHELL = r"""<!doctype html>
           : 0;
         if (Number.isFinite(revealLength)) {
           prepareReveal();
+          revealCharacters.forEach((character) => {
+            character.style.visibility = "hidden";
+          });
+          revealedCount = 0;
           applyReveal();
         } else {
           revealCharacters = [];
+          revealedCount = 0;
         }
         reportLayout();
         requestAnimationFrame(reportLayout);
@@ -264,6 +287,7 @@ _MATH_WEB_SHELL = r"""<!doctype html>
           revealTotalLength = Math.max(0, Math.floor(total));
         }
         applyReveal();
+        reportLayout();
       };
 
       const caretAt = (x, y) => {
@@ -595,6 +619,9 @@ class _MathWebView(QWebEngineView):
         if ancestor is None:
             return
         scroll_bar = ancestor.verticalScrollBar()
+        chat = _chat_view_for(self)
+        if chat is not None:
+            chat.pause_follow()
         scroll_bar.setValue(scroll_bar.value() + round(delta))
 
     def _start_selection_drag(self, x: float, y: float) -> None:
@@ -806,7 +833,7 @@ class RichText(QWidget):
         self._web_view: _MathWebView | None = None
         self._reveal_characters: int | None = None
         self._reveal_total_characters: int | None = None
-        self._text_formats: dict[int, QTextCharFormat] = {}
+        self._text_formats: list[tuple[int, int, QTextCharFormat]] = []
         self._applied_reveal_characters = 0
 
         self._stack = QStackedLayout(self)
@@ -911,8 +938,9 @@ class RichText(QWidget):
                 if fragment.isValid():
                     format_ = fragment.charFormat()
                     start = fragment.position()
-                    for offset in range(len(fragment.text())):
-                        self._text_formats[start + offset] = format_
+                    self._text_formats.append(
+                        (start, start + len(fragment.text()), format_)
+                    )
                 iterator += 1
             block = block.next()
         self._applied_reveal_characters = 0
@@ -936,6 +964,7 @@ class RichText(QWidget):
                 document_length,
             )
             self._applied_reveal_characters = document_length
+            self._fit_text_height()
             return
         if self._reveal_total_characters:
             visible = min(
@@ -979,6 +1008,7 @@ class RichText(QWidget):
             visible,
         )
         self._applied_reveal_characters = visible
+        self._fit_text_height()
 
     def _restore_text_formats(
         self,
@@ -986,14 +1016,15 @@ class RichText(QWidget):
         start: int,
         end: int,
     ) -> None:
-        for position in range(start, end):
-            format_ = self._text_formats.get(position)
-            if format_ is None:
+        for fragment_start, fragment_end, format_ in self._text_formats:
+            left = max(start, fragment_start)
+            right = min(end, fragment_end)
+            if left >= right:
                 continue
             cursor = self._text_cursor_for_range(
                 document,
-                position,
-                position + 1,
+                left,
+                right,
             )
             cursor.setCharFormat(format_)
 
@@ -1033,15 +1064,28 @@ class RichText(QWidget):
         self._set_content_height(height)
 
     def _schedule_fit(self) -> None:
-        if not self._uses_math:
+        if not self._uses_math and not self._fit_timer.isActive():
             self._fit_timer.start()
 
     def _fit_text_height(self) -> None:
         if self._uses_math:
             return
         width = max(40, self._text_view.viewport().width())
-        self._text_view.document().setTextWidth(width)
-        height = max(22, int(self._text_view.document().size().height() + 3))
+        document = self._text_view.document()
+        if abs(document.textWidth() - width) > 0.5:
+            document.setTextWidth(width)
+        if self._reveal_characters is None:
+            height = max(22, int(document.size().height() + 3))
+        else:
+            # Transparent future characters still occupy the document. Only
+            # expose the line containing the last revealed character to the
+            # outer chat scroller so it follows the typing cursor.
+            position = max(0, self._applied_reveal_characters - 1)
+            block = document.findBlock(position)
+            layout = block.layout()
+            line = layout.lineForTextPosition(position - block.position())
+            block_top = document.documentLayout().blockBoundingRect(block).top()
+            height = max(22, int(block_top + line.y() + line.height() + 3))
         self._set_content_height(height)
 
     def _set_content_height(self, height: int) -> None:
@@ -1701,12 +1745,13 @@ class UserBubble(MessageBubble):
         super().__init__(theme, parent)
         self._plain = text
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(42, 8, 0, 8)
+        outer.setContentsMargins(0, 8, 0, 8)
         outer.addStretch()
 
         self.card = QFrame()
         self.card.setObjectName("userBubble")
-        self.card.setMaximumWidth(680)
+        self.card.setMaximumWidth(MESSAGE_CONTENT_MAX_WIDTH + 28)
+        self._preferred_card_width: int | None = None
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(14, 10, 14, 10)
         card_layout.setSpacing(8)
@@ -1734,19 +1779,27 @@ class UserBubble(MessageBubble):
             self.text_view.set_html(f"<body><p>{safe}</p></body>")
             card_layout.addWidget(self.text_view)
             if not image_paths:
-                natural_document = QTextDocument()
-                natural_document.setDefaultFont(self.text_view.font())
-                natural_document.setDocumentMargin(0)
-                natural_document.setPlainText(text)
-                natural_document.setTextWidth(-1)
+                metrics = QFontMetricsF(self.text_view._text_view.font())
+                natural_width = max(
+                    (metrics.horizontalAdvance(line) for line in text.split("\n")),
+                    default=0.0,
+                )
                 content_width = max(
                     44,
-                    min(652, ceil(natural_document.idealWidth() + 3)),
+                    min(MESSAGE_CONTENT_MAX_WIDTH, ceil(natural_width + 12)),
                 )
+                self._preferred_card_width = content_width + 28
                 self.text_view.setFixedWidth(content_width)
-                self.card.setFixedWidth(content_width + 28)
+                self.card.setFixedWidth(self._preferred_card_width)
         outer.addWidget(self.card)
         self.apply_theme(theme)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._preferred_card_width is not None:
+            card_width = min(self._preferred_card_width, max(72, self.width()))
+            self.card.setFixedWidth(card_width)
+            self.text_view.setFixedWidth(card_width - 28)
 
     def apply_theme(self, theme: str) -> None:
         super().apply_theme(theme)
@@ -2181,10 +2234,15 @@ class ChatView(QScrollArea):
         self._last_bubble_width: int | None = None
         self._follow_output = True
         self._programmatic_scroll = False
+        self._layout_transition_active = False
+        self._catch_up_active = False
+        self._catch_up_start = 0
+        self._catch_up_duration = 0
+        self._catch_up_clock = QElapsedTimer()
         self._scroll_timer = QTimer(self)
-        self._scroll_timer.setSingleShot(True)
-        self._scroll_timer.timeout.connect(self._scroll_to_bottom_if_following)
-        self._scroll_timer.setInterval(0)
+        self._scroll_timer.setInterval(16)
+        self._scroll_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._scroll_timer.timeout.connect(self._advance_follow_scroll)
         self._selection_drag_source: MessageTextBrowser | _MathWebView | None = None
         self._selection_drag_pos = QPoint()
         self._selection_drag_moved = False
@@ -2213,6 +2271,7 @@ class ChatView(QScrollArea):
     def clear(self) -> None:
         self._stop_selection_drag()
         self._scroll_timer.stop()
+        self._catch_up_active = False
         for bubble in self._bubbles:
             self.messages.removeWidget(bubble)
             bubble.dispose()
@@ -2333,9 +2392,23 @@ class ChatView(QScrollArea):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        for bubble in self._bubbles:
-            self._apply_size(bubble)
+        if not self._layout_transition_active:
+            for bubble in self._bubbles:
+                self._apply_size(bubble)
         self.scroll_to_bottom()
+
+    def set_layout_transition_active(self, active: bool) -> None:
+        """Reflow rich messages once after a sidebar width transition."""
+
+        active = bool(active)
+        if active == self._layout_transition_active:
+            return
+        self._layout_transition_active = active
+        if not active:
+            self._last_bubble_width = None
+            for bubble in self._bubbles:
+                self._apply_size(bubble)
+            self.scroll_to_bottom()
 
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
@@ -2358,19 +2431,28 @@ class ChatView(QScrollArea):
         self._follow_output = enabled
         if not enabled:
             self._scroll_timer.stop()
+            self._catch_up_active = False
         self.followChanged.emit(enabled)
 
     def pause_follow(self) -> None:
         """Pause streaming auto-scroll after a user navigates upward."""
 
-        if self.verticalScrollBar().maximum() > 0:
+        if self._bubbles:
             self._set_follow_output(False)
 
     def resume_follow(self) -> None:
         """Resume auto-scroll and reveal the newest generated content."""
 
         self._set_follow_output(True)
-        self.scroll_to_bottom(force=True)
+        bar = self.verticalScrollBar()
+        distance = bar.maximum() - bar.value()
+        if distance <= 0:
+            return
+        self._catch_up_active = True
+        self._catch_up_start = bar.value()
+        self._catch_up_duration = min(650, max(260, round(260 + distance ** 0.5 * 4)))
+        self._catch_up_clock.start()
+        self._scroll_timer.start()
 
     def _on_scroll_value_changed(self, value: int) -> None:
         if self._programmatic_scroll:
@@ -2391,11 +2473,7 @@ class ChatView(QScrollArea):
         ):
             self._clear_active_selection()
         if watched is self.viewport() and event.type() == QEvent.Type.Wheel:
-            delta = event.angleDelta().y() or event.pixelDelta().y()
-            if delta < 0:
-                self.pause_follow()
-            elif delta > 0:
-                self._on_scroll_value_changed(self.verticalScrollBar().value())
+            self.pause_follow()
         elif watched is self.verticalScrollBar():
             if event.type() == QEvent.Type.MouseButtonPress:
                 self.pause_follow()
@@ -2469,9 +2547,7 @@ class ChatView(QScrollArea):
             source._extend_selection_drag(inside, self._selection_drag_pos)
 
     def wheelEvent(self, event) -> None:
-        delta = event.angleDelta().y() or event.pixelDelta().y()
-        if delta < 0:
-            self.pause_follow()
+        self.pause_follow()
         super().wheelEvent(event)
 
     def scroll_to_bottom(self, force: bool = False) -> None:
@@ -2482,10 +2558,26 @@ class ChatView(QScrollArea):
         if not self._scroll_timer.isActive():
             self._scroll_timer.start()
 
-    def _scroll_to_bottom_if_following(self) -> None:
+    def _advance_follow_scroll(self) -> None:
         if not self._follow_output:
+            self._scroll_timer.stop()
             return
         bar = self.verticalScrollBar()
+        maximum = bar.maximum()
+        current = bar.value()
+        if self._catch_up_active:
+            progress = min(1.0, self._catch_up_clock.elapsed() / self._catch_up_duration)
+            eased = progress * progress * (3.0 - 2.0 * progress)
+            target = round(self._catch_up_start + (maximum - self._catch_up_start) * eased)
+            if progress >= 1.0:
+                self._catch_up_active = False
+        else:
+            distance = maximum - current
+            target = current + min(140, max(1, ceil(distance * 0.42)))
         self._programmatic_scroll = True
-        bar.setValue(bar.maximum())
-        self._programmatic_scroll = False
+        try:
+            bar.setValue(min(maximum, target))
+        finally:
+            self._programmatic_scroll = False
+        if not self._catch_up_active and bar.value() >= bar.maximum():
+            self._scroll_timer.stop()

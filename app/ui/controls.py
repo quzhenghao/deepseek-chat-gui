@@ -179,7 +179,7 @@ class FlatPlainTextEdit(QPlainTextEdit):
 
 
 class FrameAnimator(QObject):
-    """Ramp a float on a precise 16 ms timer with a cubic ease-out curve.
+    """Ramp a float on a precise 16 ms timer with a smooth ease-in-out curve.
 
     Layout transitions in this app animate geometry directly (splitter sizes,
     widget offsets), so a plain value ramp with a fixed 60 fps tick is both
@@ -219,7 +219,7 @@ class FrameAnimator(QObject):
 
     def _advance(self) -> None:
         progress = min(1.0, self._clock.elapsed() / self._duration)
-        eased = 1.0 - (1.0 - progress) ** 3
+        eased = progress * progress * (3.0 - 2.0 * progress)
         value = self._start + (self._end - self._start) * eased
         if progress >= 1.0:
             self._timer.stop()
