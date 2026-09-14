@@ -183,6 +183,11 @@ def _normalize_math(expression: str, display: bool) -> str:
 def _extract_math(text: str) -> tuple[str, list[tuple[str, str, bool]]]:
     """Replace formulas outside Markdown code spans/fences with safe tokens."""
 
+    if "$" not in text and "\\" not in text:
+        # No dollar sign and no backslash means no math delimiter can appear,
+        # so the character-by-character scan can be skipped entirely.
+        return text, []
+
     output: list[str] = []
     formulas: list[tuple[str, str, bool]] = []
     fence: tuple[str, int] | None = None
@@ -331,8 +336,8 @@ def _decorate_code_blocks(rendered: str) -> str:
     return _CODE_BLOCK_RE.sub(replace, rendered)
 
 
-def to_html(text: str, dark: bool = False) -> str:
-    """Render Markdown to a safe fragment containing KaTeX formula placeholders."""
+def _style_html(dark: bool) -> str:
+    """Return the shared stylesheet of every rendered Markdown body."""
 
     foreground = "#F2F2F2" if dark else "#171717"
     secondary = "#B7B7B7" if dark else "#5E5E5E"
@@ -341,15 +346,6 @@ def to_html(text: str, dark: bool = False) -> str:
     scroll_track = "#242424" if dark else "#EEEEEE"
     scroll_thumb = "#858585" if dark else "#8F8F8F"
     error = "#FF8A8A" if dark else "#B42318"
-
-    source, formulas = _extract_math(text or "")
-    rendered = _MARKDOWN.render(source) if source else ""
-    rendered = _decorate_code_blocks(rendered)
-    for token, expression, display in formulas:
-        formula = _formula_html(expression, display)
-        if display:
-            rendered = rendered.replace(f"<p>{token}</p>", formula)
-        rendered = rendered.replace(token, formula)
 
     return f"""
     <style>
@@ -420,6 +416,324 @@ def to_html(text: str, dark: bool = False) -> str:
         white-space:pre-wrap; overflow-wrap:anywhere; padding:2px 4px; }}
       .markdown-body .katex-error {{ color:{error} !important;
         font-family:{_CODE_FONT_STACK}; }}
-    </style>
-    <div class="markdown-body">{rendered or html.escape(text or '')}</div>
+    </style>"""
+
+
+def render_body(text: str) -> str:
+    """Render Markdown into the inner HTML of a ``.markdown-body`` block."""
+
+    source, formulas = _extract_math(text or "")
+    rendered = _MARKDOWN.render(source) if source else ""
+    rendered = _decorate_code_blocks(rendered)
+    for token, expression, display in formulas:
+        formula = _formula_html(expression, display)
+        if display:
+            rendered = rendered.replace(f"<p>{token}</p>", formula)
+        rendered = rendered.replace(token, formula)
+
+    return rendered or html.escape(text or "")
+
+
+def to_html(text: str, dark: bool = False) -> str:
+    """Render Markdown to a safe fragment containing KaTeX formula placeholders."""
+
+    return (
+        _style_html(dark)
+        + f'\n    <div class="markdown-body">{render_body(text)}</div>\n    '
+    )
+
+
+def _tail_starts_open_fence(source: str) -> bool:
+    """True when the streaming tail is one code fence that is still open."""
+
+    lines = source.split("\n")
+    index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines):
+        return False
+    marker = _fence_marker(lines[index])
+    if marker is None:
+        return False
+    for line in lines[index + 1 :]:
+        if _closing_fence(line, marker):
+            return False
+    return True
+
+
+def _leading_fence_marker(source: str) -> tuple[str, int] | None:
+    """Fence marker of the first non-blank line, when it opens a fence."""
+
+    for line in source.split("\n"):
+        if not line.strip():
+            continue
+        return _fence_marker(line)
+    return None
+
+
+# Rendered code blocks grow by appending raw text to the ``<code>`` element,
+# so the frozen HTML keeps a hole where that text has to land.
+_CODE_PLACEHOLDER = "DEEPSEEKSTREAMCODEPLACEHOLDER"
+
+
+def _stable_prefix_length(tail: str) -> int:
+    """Length of the tail prefix whose blocks can never change again.
+
+    Markdown parses blocks top-down, so a chunk of new text can only modify
+    the block it lands in; every complete block before that one is final.
+    The last top-level block is therefore kept unstable, and the returned
+    length always sits on a top-level block boundary, which makes rendering
+    the frozen prefix on its own byte-for-byte identical to rendering it
+    together with the rest of the document.
     """
+
+    if not tail.strip():
+        return 0
+    if _tail_starts_open_fence(tail):
+        return 0
+    starts: list[int] = []
+    for token in _MARKDOWN.parse(tail):
+        if token.level == 0 and token.map:
+            starts.append(int(token.map[0]))
+    if len(starts) < 2:
+        return 0
+    boundary_line = starts[-1]
+    if boundary_line <= 0:
+        return 0
+    return sum(len(line) + 1 for line in tail.split("\n")[:boundary_line])
+
+
+class StreamingMarkdown:
+    """Incremental Markdown renderer for a growing streaming answer.
+
+    The renderer keeps two DOM-ready pieces: ``stable_html`` grows by appending
+    the HTML of completed blocks, and ``tail_html`` is re-rendered from the
+    last block on every update.  The model output can therefore stream into a
+    display surface without ever re-parsing or re-rendering the whole answer.
+
+    An open code fence is handled line by line: finished lines are appended to
+    the code element already on screen (``code`` deltas) instead of re-rendering
+    the whole block, which keeps every update proportional to the new text.
+    """
+
+    def __init__(self, dark: bool = False) -> None:
+        self._dark = bool(dark)
+        self._source = ""
+        self._stable_source_length = 0
+        self._stable_html = ""
+        self._tail_html = ""
+        self._code_text = ""
+        self._code_tail = ""
+        self._code_insert_at = 0
+        self._code_open = False
+        self._code_marker: tuple[str, int] | None = None
+        self._revision = 0
+
+    @property
+    def dark(self) -> bool:
+        return self._dark
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    @property
+    def stable_html(self) -> str:
+        return self.composed_stable_html()
+
+    @property
+    def raw_stable_html(self) -> str:
+        return self._stable_html
+
+    @property
+    def code_tail_text(self) -> str:
+        """Live last line of an open code fence, as it has to be displayed."""
+
+        return self._displayed_code_tail()
+
+    def _displayed_code_tail(self) -> str:
+        # Markdown drops a trailing whitespace-only line of a code block.  It
+        # is still carried verbatim, because indentation that arrives later
+        # must keep it.
+        return self._code_tail if self._code_tail.strip() else ""
+
+    @property
+    def tail_html(self) -> str:
+        return self._tail_html
+
+    @property
+    def revision(self) -> int:
+        return self._revision
+
+    def set_theme(self, dark: bool) -> None:
+        self._dark = bool(dark)
+
+    def reset(self) -> None:
+        self._source = ""
+        self._stable_source_length = 0
+        self._stable_html = ""
+        self._tail_html = ""
+        self._code_text = ""
+        self._code_tail = ""
+        self._code_insert_at = 0
+        self._code_open = False
+        self._code_marker = None
+        self._revision += 1
+
+    def composed_stable_html(self, include_code_tail: bool = True) -> str:
+        """Frozen HTML including the code lines appended since it was drawn."""
+
+        code = self._code_text
+        if include_code_tail:
+            code += self._displayed_code_tail()
+        if not code:
+            return self._stable_html
+        at = max(0, min(self._code_insert_at, len(self._stable_html)))
+        return (
+            self._stable_html[:at]
+            + html.escape(code)
+            + self._stable_html[at:]
+        )
+
+    def style_html(self) -> str:
+        return _style_html(self._dark)
+
+    def body_html(self) -> str:
+        return (
+            '<div class="markdown-body">'
+            f"{self.composed_stable_html()}{self._tail_html}"
+            "</div>"
+        )
+
+    def html(self) -> str:
+        return self.style_html() + self.body_html()
+
+    def update(self, source: str) -> tuple[str, str, str]:
+        """Grow the renderer: ``(stable delta, code delta, tail)`` HTML."""
+
+        source = str(source or "")
+        if source == self._source:
+            return "", "", self._tail_html
+        if not source.startswith(self._source):
+            self.reset()
+        self._source = source
+        self._revision += 1
+
+        html_delta = ""
+        code_delta = ""
+        for _ in range(8):
+            tail_source = source[self._stable_source_length :]
+            html, code, remaining = self._freeze(tail_source)
+            if html:
+                html_delta += html
+                self._stable_html += html
+            if code:
+                code_delta += code
+                self._code_text += code
+            consumed = len(tail_source) - len(remaining)
+            if consumed > 0:
+                self._stable_source_length += consumed
+            if consumed <= 0 or (not html and not code):
+                break
+        remaining_source = source[self._stable_source_length :]
+        self._tail_html = (
+            render_body(remaining_source) if remaining_source.strip() else ""
+        )
+        return html_delta, code_delta, self._tail_html
+
+    def _freeze(self, tail: str) -> tuple[str, str, str]:
+        """Freeze what is final and return ``(html, code, remaining tail)``."""
+
+        if not tail:
+            return "", "", tail
+        if self._code_open:
+            return self._freeze_open_fence(tail)
+        marker = _leading_fence_marker(tail)
+        if marker is None:
+            length = _stable_prefix_length(tail)
+            if length <= 0:
+                return "", "", tail
+            return render_body(tail[:length]), "", tail[length:]
+        return self._freeze_new_fence(tail, marker)
+
+    def _freeze_new_fence(
+        self,
+        tail: str,
+        marker: tuple[str, int],
+    ) -> tuple[str, str, str]:
+        lines = tail.split("\n")
+        closing = next(
+            (
+                index
+                for index in range(1, len(lines))
+                if _closing_fence(lines[index], marker)
+            ),
+            None,
+        )
+        if closing is None:
+            complete = lines[:-1]
+            if not complete:
+                return "", "", tail
+            html = self._start_code_block("\n".join(complete) + "\n", marker)
+            self._code_tail = lines[-1]
+            return html, "", ""
+        remaining = "\n".join(lines[closing + 1 :])
+        head = "\n".join(lines[: closing + 1]) + "\n"
+        self._code_tail = ""
+        return render_body(head), "", remaining
+
+    def _start_code_block(
+        self,
+        markup: str,
+        marker: tuple[str, int] | None = None,
+    ) -> str:
+        """Render the head of a fence and remember where code lines go."""
+
+        rendered = render_body(markup + _CODE_PLACEHOLDER)
+        index = rendered.find(_CODE_PLACEHOLDER)
+        self._code_open = True
+        self._code_marker = marker
+        if index < 0:
+            self._code_insert_at = len(self._stable_html)
+            return rendered
+        self._code_insert_at = len(self._stable_html) + index
+        return rendered[:index] + rendered[index + len(_CODE_PLACEHOLDER) :]
+
+    def _freeze_open_fence(self, tail: str) -> tuple[str, str, str]:
+        # The first fragment continues the line that is still being typed, so
+        # it is prepended before the closing marker of the fence is looked for.
+        lines = tail.split("\n")
+        if self._code_tail:
+            lines = [self._code_tail + lines[0], *lines[1:]]
+        marker = self._code_marker
+        for index in range(0, len(lines) - 1):
+            if marker is not None and _closing_fence(lines[index], marker):
+                code = "\n".join(lines[:index]) + "\n" if index else ""
+                remaining = "\n".join(lines[index + 1 :])
+                self._code_open = False
+                self._code_tail = ""
+                return "", code, remaining
+        complete = lines[:-1]
+        if marker is not None and _closing_fence(lines[-1], marker):
+            # A closing marker does not need its own line break to end a fence.
+            code = "\n".join(complete) + "\n" if complete else ""
+            self._code_open = False
+            self._code_tail = ""
+            return "", code, ""
+        self._code_tail = lines[-1]
+        if not complete:
+            return "", "", ""
+        return "", "\n".join(complete) + "\n", ""
+
+    def full_html(self) -> str:
+        """Render the whole source in one pass.
+
+        Used once a stream finishes so transient splits (an unterminated
+        formula that only became valid later, a reference link defined after
+        its use) can never leave a stale fragment on screen.
+        """
+
+        return (
+            _style_html(self._dark)
+            + f'<div class="markdown-body">{render_body(self._source)}</div>'
+        )

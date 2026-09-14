@@ -151,6 +151,41 @@ class MemoryStore:
 
 
 class UITests(unittest.TestCase):
+    SURFACE_METRICS_SCRIPT = """
+      (() => {
+        const root = document.getElementById("content-root");
+        const blocks = Array.from(
+          root.querySelector(".markdown-body").children
+        ).filter(
+          (node) => !node.classList.contains("deepseek-stream-anchor")
+            && !node.classList.contains("deepseek-type-char")
+        );
+        const tail = blocks[blocks.length - 1] || null;
+        const rect = root.getBoundingClientRect();
+        return JSON.stringify({
+          overflow: getComputedStyle(document.documentElement).overflowY,
+          scrollY: window.scrollY,
+          scrollHeight: Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight
+          ),
+          innerHeight: window.innerHeight,
+          documentHeight: Math.ceil(rect.height),
+          text: (root.innerText || "").slice(-40),
+          tailTop: tail
+            ? Math.ceil(tail.getBoundingClientRect().top - rect.top)
+            : 0,
+          characters: document.querySelectorAll(".deepseek-type-char").length,
+          visibleCharacters: document.querySelectorAll(
+            '.deepseek-type-char[style*="visibility: visible"]'
+          ).length,
+          katex: document.querySelectorAll(".katex").length,
+          mathml: document.querySelectorAll("math").length,
+          images: document.images.length
+        });
+      })()
+    """
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
@@ -171,6 +206,29 @@ class UITests(unittest.TestCase):
         page.runJavaScript(script, result.append)
         self.assertTrue(self.wait_for(lambda: bool(result), timeout_ms))
         return result[0]
+
+    def message_tiles(self, bubble) -> list[_MathWebView]:
+        """Wait until a bubble painted its Chromium tiles and return them."""
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: bubble.content_view.tile_count > 0
+                and all(
+                    tile._rendered_generation >= 0 and tile.document_height > 22
+                    for tile in bubble.content_view._tiles
+                ),
+                timeout_ms=8000,
+            ),
+            "the message never painted a Chromium tile",
+        )
+        return list(bubble.content_view._tiles)
+
+    def surface_metrics(self, tile) -> dict:
+        """Read the shared surface probe out of one Chromium tile."""
+
+        return json.loads(
+            self.javascript_value(tile.page(), self.SURFACE_METRICS_SCRIPT)
+        )
 
     def test_streaming_reasoning_is_animated_and_collapsed(self) -> None:
         view = ChatView()
@@ -204,30 +262,37 @@ class UITests(unittest.TestCase):
         view.resize(900, 600)
         view.show()
         bubble = view.add_streaming("模型 · 标准模式", False)
-        content = "第一行正文内容。\n\n" + "第二行正文内容。" * 12
+        content = (
+            "第一行正文内容。\n\n"
+            + ("第二行正文内容，用于观察逐渐浮现的动画。" * 8 + "\n\n") * 40
+        )
         bubble.set_content(content)
 
+        body = bubble.content_view
         self.assertTrue(
             self.wait_for(
-                lambda: bubble._typing_timer.isActive(),
+                lambda: body.is_revealing and body.frontier > 0,
                 timeout_ms=3000,
             )
         )
-        self.assertGreater(bubble._typing_visible_characters, 0)
-        self.assertLess(
-            bubble._typing_visible_characters,
-            len(content),
-        )
+        samples = [body.height()]
+        for _ in range(6):
+            QTest.qWait(30)
+            self.app.processEvents()
+            samples.append(body.height())
+        self.assertLess(samples[0], body.document_height)
+        self.assertEqual(samples, sorted(samples), "the reveal must never rewind")
+        self.assertGreater(samples[-1], samples[0])
 
         bubble.finish()
         self.assertTrue(
             self.wait_for(
-                lambda: not bubble._typing_timer.isActive(),
-                timeout_ms=5000,
+                lambda: not body.is_revealing,
+                timeout_ms=8000,
             )
         )
-        self.assertFalse(bubble._typing_enabled)
-        self.assertEqual(bubble._typing_visible_characters, len(content))
+        self.assertGreaterEqual(body.frontier, body.document_height)
+        self.assertGreaterEqual(body.height(), body.document_height)
         self.assertTrue(bubble.actions.isVisible())
         view.close()
 
@@ -237,10 +302,18 @@ class UITests(unittest.TestCase):
         view.show()
         bubble = view.add_streaming("模型 · 标准模式", False)
         bubble.set_content("逐字显示的长回答。" * 800)
-        self.assertTrue(self.wait_for(lambda: bubble._typing_visible_characters > 500))
-        document_height = bubble.content_view.document().size().height()
+        body = bubble.content_view
+        self.assertTrue(
+            self.wait_for(
+                lambda: body.is_revealing
+                and body.height() > 300
+                and body.height() < body.document_height,
+                timeout_ms=5000,
+            )
+        )
+        document_height = body.document().size().height()
         self.assertGreater(document_height, view.viewport().height() * 2)
-        self.assertLess(bubble.content_view.height(), document_height / 2)
+        self.assertLess(body.height(), document_height / 2)
         self.assertLess(view.verticalScrollBar().maximum(), document_height / 2)
 
         self.assertTrue(self.wait_for(lambda: view.verticalScrollBar().maximum() > 150))
@@ -274,28 +347,163 @@ class UITests(unittest.TestCase):
         )
         view.close()
 
-    def test_code_streaming_surface_uses_revealed_height(self) -> None:
-        source = "```python\n" + 'print("hello world")\n' * 120 + "```"
-        view = _MathWebView()
-        view.resize(700, 400)
+    def test_streaming_buffer_is_revealed_from_the_cache(self) -> None:
+        """Model output is buffered first and then read back out on screen."""
+
+        view = ChatView()
+        view.resize(900, 500)
         view.show()
-        view.set_content(to_html(source), 90, len(source))
+        bubble = view.add_streaming("模型 · 标准模式", False)
+        content = "缓存中的长回答。" * 200
+        bubble.set_content(content)
+        body = bubble.content_view
+
+        # Everything the worker sent is already buffered ...
+        self.assertEqual(bubble._plain, content)
+        # ... while the screen is still catching up through the animation.
+        self.assertTrue(self.wait_for(lambda: body.is_revealing))
+        self.assertLess(body.frontier, body.document_height)
+
+        bubble.finish()
+        self.assertTrue(self.wait_for(lambda: not body.is_revealing, timeout_ms=8000))
+        self.assertGreaterEqual(body.frontier, body.document_height)
+        self.assertIn(
+            content[-20:],
+            body.document().toPlainText().replace("\u2028", ""),
+        )
+        view.close()
+
+    def test_streaming_long_answer_follows_the_newest_text(self) -> None:
+        view = ChatView()
+        view.resize(820, 520)
+        view.show()
+        bubble = view.add_streaming("模型 · 标准模式", False)
+        source = (
+            "处理过程说明。\n\n```python\n"
+            + "".join(f"value_{index} = {index}\n" for index in range(420))
+            + "```\n\n收尾段落。"
+        )
+        step = max(1, len(source) // 40)
+        for index in range(0, len(source), step):
+            bubble.set_content(source[: index + step])
+            QTest.qWait(20)
+        bubble.finish()
+        self.assertTrue(
+            self.wait_for(lambda: not bubble.content_view.is_revealing, timeout_ms=20000)
+        )
         self.assertTrue(
             self.wait_for(
-                lambda: view._rendered_generation >= 0 and view.height() > 22
+                lambda: view.verticalScrollBar().maximum() > 0
+                and view.verticalScrollBar().value()
+                >= view.verticalScrollBar().maximum() - 2,
+                timeout_ms=8000,
+            ),
+            "the lane must keep the newest text at the bottom",
+        )
+        self.assertTrue(view.follows_output)
+        tiles = self.message_tiles(bubble)
+        self.assertGreaterEqual(len(tiles), 2)
+        view.close()
+
+    def test_follow_button_resumes_after_a_streaming_wheel_interrupt(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(1180, 760)
+        window.show()
+        window.chat_workspace.set_page(window.chat_view)
+        window.chat_view.add_user("给我一段很长的实现说明")
+        bubble = window.chat_view.add_streaming("模型 · 标准模式", False)
+        source = (
+            "说明如下。\n\n```python\n"
+            + "".join(f"line_{index} = 'value {index}'\n" for index in range(200))
+            + "```\n"
+        )
+        step = max(1, len(source) // 30)
+        for index in range(0, len(source), step):
+            bubble.set_content(source[: index + step])
+            QTest.qWait(20)
+        bar = window.chat_view.verticalScrollBar()
+        self.assertTrue(self.wait_for(lambda: bar.maximum() > 200))
+
+        wheel = QWheelEvent(
+            QPointF(30, 30),
+            QPointF(window.chat_view.viewport().mapToGlobal(QPoint(30, 30))),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(window.chat_view.viewport(), wheel)
+        self.assertFalse(window.chat_view.follows_output)
+        self.assertTrue(
+            self.wait_for(lambda: window.chat_workspace.follow_button.isVisible())
+        )
+
+        # Keep streaming while the user reads: the view must stay put.
+        bubble.set_content(source + "\n补充结尾。\n")
+        interrupted = bar.value()
+        QTest.qWait(120)
+        self.assertLessEqual(bar.value(), interrupted)
+        self.assertFalse(window.chat_view.follows_output)
+        bubble.finish()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: not bubble.content_view.is_revealing,
+                timeout_ms=20000,
             )
         )
-        full_height = self.javascript_value(
-            view.page(),
-            'document.getElementById("content-root").getBoundingClientRect().height',
+        window.chat_workspace.follow_button.click()
+        self.assertTrue(window.chat_view.follows_output)
+        self.assertTrue(
+            self.wait_for(
+                lambda: bar.value() >= bar.maximum() - 2,
+                timeout_ms=5000,
+            ),
+            "the follow button must return to the newest text",
         )
-        self.assertGreater(full_height, 1500)
-        self.assertLess(view.height(), full_height / 4)
-        view.set_reveal_characters(None)
-        self.assertTrue(self.wait_for(lambda: view.height() >= full_height))
-        view.dispose()
-        view.close()
-        view.deleteLater()
+        window.close()
+
+    def test_streaming_code_surface_grows_with_the_reveal_frontier(self) -> None:
+        source = "```python\n" + 'print("hello world")\n' * 120 + "```"
+        view = ChatView()
+        view.resize(700, 400)
+        view.show()
+        bubble = view.add_streaming("模型 · 标准模式", False)
+        bubble.set_content(source)
+        body = bubble.content_view
+        self.assertTrue(body.is_revealing)
+        self.assertLess(body.height(), 200, "nothing is revealed yet")
+
+        tiles = self.message_tiles(bubble)
+        self.assertTrue(
+            self.wait_for(
+                lambda: body.document_height > 1500,
+                timeout_ms=8000,
+            )
+        )
+
+        heights = [body.height()]
+        for _ in range(6):
+            QTest.qWait(30)
+            self.app.processEvents()
+            heights.append(body.height())
+        self.assertGreater(heights[-1], heights[0])
+        self.assertEqual(heights, sorted(heights), "the frontier only advances")
+        self.assertLessEqual(body.height(), body.document_height + 2)
+
+        self.assertLessEqual(tiles[0].height(), body.tile_height)
+        metrics = self.surface_metrics(tiles[0])
+        self.assertEqual(metrics["overflow"], "hidden")
+        self.assertEqual(metrics["scrollY"], 0)
+
+        bubble.finish()
+        self.assertTrue(self.wait_for(lambda: not body.is_revealing, timeout_ms=8000))
+        self.assertGreaterEqual(body.height(), body.document_height)
 
     def test_reasoning_preview_fills_width_and_keeps_streaming_tail_at_60fps(self) -> None:
         self.assertEqual(
@@ -429,23 +637,15 @@ class UITests(unittest.TestCase):
         view.show()
         bubble = view.add_streaming("DeepSeek V4.1 Flash · 标准模式", False)
         bubble.set_content(r"正在生成：\[\frac{a}")
-        QTest.qWait(80)
+        QTest.qWait(120)
         self.app.processEvents()
-        self.assertIsNone(bubble.content_view._web_view)
+        self.assertFalse(bubble.content_view.uses_web_renderer)
 
         bubble.set_content(r"正在生成：\[\frac{a}{b}\] 已完成。")
         bubble.finish()
-        web_view = bubble.content_view._web_view
-        self.assertIsNotNone(web_view)
-        self.assertTrue(
-            self.wait_for(
-                lambda: bubble.content_view._stack.currentWidget() is web_view
-            )
-        )
-        count = self.javascript_value(
-            web_view.page(), "document.querySelectorAll('.katex').length"
-        )
-        self.assertEqual(count, 1)
+        tiles = self.message_tiles(bubble)
+        self.assertTrue(bubble.content_view.uses_web_renderer)
+        self.assertEqual(self.surface_metrics(tiles[0])["katex"], 1)
         view.close()
 
     def test_short_user_message_bubble_uses_its_natural_width(self) -> None:
@@ -552,7 +752,8 @@ class UITests(unittest.TestCase):
         view.show()
         bubble = view.add_assistant("普通 Markdown 回答，不包含数学公式。", thinking=False)
         self.app.processEvents()
-        self.assertIsNone(bubble.content_view._web_view)
+        self.assertFalse(bubble.content_view.uses_web_renderer)
+        self.assertEqual(bubble.content_view.tile_count, 0)
         self.assertGreater(bubble.content_view.height(), 20)
         view.close()
 
@@ -567,14 +768,7 @@ class UITests(unittest.TestCase):
             "~~~",
             thinking=False,
         )
-        web_view = bubble.content_view._web_view
-        self.assertIsNotNone(web_view)
-        self.assertTrue(
-            self.wait_for(
-                lambda: bubble.content_view._stack.currentWidget() is web_view,
-                timeout_ms=5000,
-            )
-        )
+        web_view = self.message_tiles(bubble)[0]
         self.assertEqual(
             self.javascript_value(
                 web_view.page(),
@@ -621,14 +815,8 @@ class UITests(unittest.TestCase):
             rf"\[{long_formula}\]"
         )
         bubble = view.add_assistant(content, thinking=False)
-        web_view = bubble.content_view._web_view
-        self.assertIsNotNone(web_view)
-        self.assertTrue(
-            self.wait_for(
-                lambda: bubble.content_view._stack.currentWidget() is web_view
-                and web_view.height() > 22
-            )
-        )
+        web_view = self.message_tiles(bubble)[0]
+        self.assertTrue(self.wait_for(lambda: web_view.height() > 22))
         QTest.qWait(350)
         self.app.processEvents()
 
@@ -1153,18 +1341,9 @@ class UITests(unittest.TestCase):
         window.show()
         window.on_select_conversation(conversation["id"])
         bubble = window.chat_view._bubbles[-1]
-        web_view = bubble.content_view._web_view
-        self.assertIsNotNone(web_view)
-        self.assertTrue(
-            self.wait_for(
-                lambda: bubble.content_view._stack.currentWidget() is web_view
-                and web_view.height() > 22
-            )
-        )
-        count = self.javascript_value(
-            web_view.page(), "document.querySelectorAll('.katex').length"
-        )
-        self.assertEqual(count, 1)
+        web_view = self.message_tiles(bubble)[0]
+        self.assertTrue(self.wait_for(lambda: web_view.height() > 22))
+        self.assertEqual(self.surface_metrics(web_view)["katex"], 1)
         composer_rect = window.input_panel.geometry()
         viewport_bottom = window.chat_view.viewport().mapTo(
             window.chat_workspace,
@@ -1201,13 +1380,15 @@ class UITests(unittest.TestCase):
                 )
                 for index in range(4)
             ]
-            web_views = [bubble.content_view._web_view for bubble in bubbles]
-            self.assertTrue(all(web_view is not None for web_view in web_views))
+            web_views = [
+                tile
+                for bubble in bubbles
+                for tile in self.message_tiles(bubble)
+            ]
             self.assertTrue(
                 self.wait_for(
                     lambda: all(
-                        web_view is not None
-                        and web_view._rendered_generation >= 0
+                        web_view._rendered_generation >= 0
                         and web_view.height() > 22
                         for web_view in web_views
                     ),
@@ -1605,22 +1786,23 @@ class UITests(unittest.TestCase):
     def test_inline_web_surface_never_exceeds_the_gpu_texture_limit(self) -> None:
         view = _MathWebView()
         view.resize(840, 22)
-        view._apply_content_height(60_000)
-        self.assertLessEqual(view.height(), WEB_SURFACE_MAX_HEIGHT)
-        self.assertLessEqual(view.height(), WEB_SURFACE_TEXTURE_LIMIT)
-        self.assertGreaterEqual(view.height(), 22)
+        limit = view._surface_height_limit()
+        self.assertLessEqual(limit, WEB_SURFACE_MAX_HEIGHT)
+        self.assertLessEqual(limit, WEB_SURFACE_TEXTURE_LIMIT)
+        self.assertGreaterEqual(limit, 1200)
 
-        view._apply_content_height(320)
-        self.assertEqual(view.height(), 321)
-
-        self.assertIn("internalScroll", _MATH_WEB_SHELL)
-        self.assertIn("if (!atEdge) return;", _MATH_WEB_SHELL)
+        # The lane owns scrolling: a surface is one fixed window of the
+        # answer, never a scroll container of its own.
+        self.assertNotIn("internalScroll", _MATH_WEB_SHELL)
         self.assertIn("overflow: hidden", _MATH_WEB_SHELL)
         self.assertIn("bridge.scrollVertically", _MATH_WEB_SHELL)
+        self.assertIn("setDeepSeekOffset", _MATH_WEB_SHELL)
+        self.assertIn("setDeepSeekStream", _MATH_WEB_SHELL)
+        self.assertIn("window.scrollTo(0, 0)", _MATH_WEB_SHELL)
         view.dispose()
         QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
-    def test_long_inline_web_surface_keeps_the_answer_tail_scrollable(self) -> None:
+    def test_long_answer_scrolls_in_one_lane_without_inner_scrolling(self) -> None:
         view = ChatView()
         view.resize(720, 600)
         view.show()
@@ -1632,71 +1814,52 @@ class UITests(unittest.TestCase):
         )
 
         bubble = view.add_assistant(content, thinking=False)
-        web_view = bubble.content_view._web_view
-        self.assertIsNotNone(web_view)
+        body = bubble.content_view
+        tiles = self.message_tiles(bubble)
         self.assertTrue(
             self.wait_for(
-                lambda: web_view.height() == web_view._surface_height_limit()
-                and web_view.height() > 22,
+                lambda: body.document_height > body.tile_height,
+                timeout_ms=8000,
+            )
+        )
+        self.assertGreaterEqual(len(tiles), 2, "a long answer needs windowed tiles")
+        self.assertTrue(
+            self.wait_for(
+                lambda: sum(tile.height() for tile in tiles)
+                >= body.document_height,
                 timeout_ms=5000,
-            )
+            ),
+            "the tile stack must cover the whole answer",
         )
 
-        metrics = json.loads(
-            self.javascript_value(
-                web_view.page(),
-                """
-                JSON.stringify({
-                  overflow: getComputedStyle(document.documentElement)
-                    .overflowY,
-                  innerHeight: window.innerHeight,
-                  scrollHeight: Math.max(
-                    document.documentElement.scrollHeight,
-                    document.body.scrollHeight
-                  ),
-                  maxScroll: Math.max(
-                    0,
-                    Math.max(
-                      document.documentElement.scrollHeight,
-                      document.body.scrollHeight
-                    ) - window.innerHeight
-                  )
-                })
-                """,
+        limit = body.tile_height
+        for index, tile in enumerate(tiles):
+            self.assertEqual(tile.geometry().y(), index * limit)
+            self.assertLessEqual(tile.height(), limit)
+            metrics = self.surface_metrics(tile)
+            self.assertEqual(metrics["overflow"], "hidden")
+            self.assertEqual(metrics["scrollY"], 0, "no tile may scroll itself")
+            self.assertEqual(
+                metrics["documentHeight"],
+                body.document_height,
+                "every tile paints the same document",
             )
-        )
-        self.assertEqual(metrics["overflow"], "auto")
-        self.assertGreater(metrics["scrollHeight"], metrics["innerHeight"])
-        self.assertGreater(metrics["maxScroll"], 0)
 
-        tail_scroll = json.loads(
-            self.javascript_value(
-                web_view.page(),
-                """
-                (() => {
-                  window.scrollTo(0, document.documentElement.scrollHeight);
-                  return JSON.stringify({
-                    scrollY: window.scrollY,
-                    maxScroll: Math.max(
-                      0,
-                      Math.max(
-                        document.documentElement.scrollHeight,
-                        document.body.scrollHeight
-                      ) - window.innerHeight
-                    ),
-                    tail: document.body.innerText.slice(-20)
-                  });
-                })()
-                """,
-            )
+        # The end of the answer must be painted by the last tile's window.
+        last_metrics = self.surface_metrics(tiles[-1])
+        self.assertIn("回答尾部", last_metrics["text"])
+        window_start = (len(tiles) - 1) * limit
+        self.assertGreaterEqual(last_metrics["tailTop"], window_start)
+        self.assertLessEqual(
+            last_metrics["tailTop"],
+            last_metrics["documentHeight"],
         )
-        self.assertGreater(tail_scroll["scrollY"], 0)
-        self.assertAlmostEqual(
-            tail_scroll["scrollY"],
-            tail_scroll["maxScroll"],
-            delta=2,
-        )
-        self.assertIn("回答尾部", tail_scroll["tail"])
+
+        # ... and the chat lane alone scrolls to it.
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+        self.app.processEvents()
+        self.assertGreater(view.verticalScrollBar().value(), 0)
+        self.assertGreater(view.verticalScrollBar().maximum(), 0)
 
         view.close()
 
@@ -1884,15 +2047,18 @@ class UITests(unittest.TestCase):
                 shown.append(self)
                 return None
 
+        view = ChatView()
+        bubble = view.add_assistant("正文内容", meta="DeepSeek")
+        coded = view.add_assistant("```text\nprint(1)\n```", meta="DeepSeek")
+        tile = self.message_tiles(coded)[0]
+
         with patch("app.ui.controls.QMenu", SpyMenu):
             editor = ChatTextEdit()
             editor.setPlainText("草稿")
             editor.contextMenuEvent(FakeMenuEvent())
 
-            view = ChatView()
-            bubble = view.add_assistant("正文内容", meta="DeepSeek")
             bubble.content_view._text_view.contextMenuEvent(FakeMenuEvent())
-            bubble.content_view._ensure_web_view().contextMenuEvent(FakeMenuEvent())
+            tile.contextMenuEvent(FakeMenuEvent())
 
             cfg = dict(DEFAULTS)
             cfg["models"] = list(DEFAULTS["models"])

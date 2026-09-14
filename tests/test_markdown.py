@@ -9,10 +9,110 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from app import ASSETS_DIR
-from app.markdown import _extract_math, to_html
+from app.markdown import (
+    StreamingMarkdown,
+    _extract_math,
+    render_body,
+    to_html,
+)
 
 
 class MarkdownTests(unittest.TestCase):
+    STREAMED_DOCUMENT = (
+        "# 结论\n\n"
+        "先给出结论，再补充细节。这里包含行内公式 "
+        r"$P(A\mid B)=\frac{P(B\mid A)P(A)}{P(B)}$ 与链接"
+        " [文档](https://example.com)。\n\n"
+        "- 第一点：说明原因。\n"
+        "- 第二点：给出做法。\n"
+        "  - 补充子项\n\n"
+        "```python\n"
+        "def solve(values):\n"
+        "    return sum(values)\n"
+        "\n"
+        "print(solve([1, 2, 3]))\n"
+        "```\n\n"
+        "| 名称 | 数值 |\n"
+        "| --- | ---: |\n"
+        "| A | 1 |\n\n"
+        r"\[A=\begin{pmatrix}a&b\\c&d\end{pmatrix}\]"
+        "\n\n"
+        "最后一段收尾。\n"
+    )
+
+    def test_streamed_render_matches_a_single_full_render(self) -> None:
+        """Every prefix of a streamed answer must render byte-identically."""
+
+        renderer = StreamingMarkdown()
+        checked = 0
+        for size in range(1, len(self.STREAMED_DOCUMENT) + 1, 7):
+            renderer.update(self.STREAMED_DOCUMENT[:size])
+            combined = renderer.composed_stable_html() + renderer.tail_html
+            expected = render_body(self.STREAMED_DOCUMENT[:size])
+            self.assertEqual(
+                combined,
+                expected,
+                f"streamed render diverged at {size} characters",
+            )
+            checked += 1
+        self.assertGreater(checked, 10)
+
+    def test_streamed_render_keeps_updates_proportional_to_new_text(self) -> None:
+        source = (
+            "说明：\n\n```python\n"
+            + "".join(f"line_{index} = {index}\n" for index in range(200))
+            + "```\n"
+        )
+        renderer = StreamingMarkdown()
+        renderer.update(source[: source.index("```\n", 10)])
+        first_html = renderer.raw_stable_html
+        html, code, tail = renderer.update(source)
+        self.assertTrue(first_html, "the code block head is rendered once")
+        self.assertLess(
+            len(html) + len(code) + len(tail),
+            200,
+            "growing a code block only appends its new lines",
+        )
+        self.assertIn("line_199", renderer.composed_stable_html())
+        self.assertEqual(
+            renderer.composed_stable_html() + renderer.tail_html,
+            render_body(source),
+        )
+
+    def test_streamed_render_grows_an_open_fence_line_by_line(self) -> None:
+        source = "说明：\n\n```python\nprint(1)\nprint(2)"
+        renderer = StreamingMarkdown()
+        renderer.update(source)
+        self.assertIn("说明", renderer.raw_stable_html)
+        self.assertEqual(renderer.tail_html, "", "the fence has no markdown tail")
+        self.assertEqual(renderer.code_tail_text, "print(2)")
+        self.assertIn("print(1)", renderer.composed_stable_html())
+
+        renderer.update(source + "\n")
+        self.assertEqual(renderer.code_tail_text, "")
+        self.assertEqual(
+            renderer.composed_stable_html() + renderer.tail_html,
+            render_body(source + "\n"),
+        )
+
+    def test_streamed_renderer_rebuilds_when_the_source_restarts(self) -> None:
+        renderer = StreamingMarkdown()
+        renderer.update("第一版内容。\n")
+        renderer.update("完全不同的第二版内容。\n")
+        self.assertEqual(
+            renderer.composed_stable_html() + renderer.tail_html,
+            render_body("完全不同的第二版内容。\n"),
+        )
+
+    def test_full_html_matches_the_incremental_output(self) -> None:
+        renderer = StreamingMarkdown()
+        renderer.update(self.STREAMED_DOCUMENT)
+        self.assertEqual(
+            renderer.html(),
+            renderer.full_html(),
+            "an incrementally rendered answer equals a single full render",
+        )
+
     def test_bundled_katex_runtime_and_all_woff2_fonts_are_present(self) -> None:
         katex_dir = ASSETS_DIR / "vendor" / "katex"
         stylesheet = katex_dir / "katex.min.css"

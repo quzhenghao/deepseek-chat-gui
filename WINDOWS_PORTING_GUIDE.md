@@ -89,18 +89,32 @@ New-Item -ItemType Directory -Force -Path $env:DEEPSEEK_CHAT_GUI_HOME | Out-Null
 | `app/ui/theme.py::MESSAGE_CONTENT_MAX_WIDTH`, `message_bubbles.py::UserBubble` | 当前输入框可见编辑区域、AI 正文区域、用户气泡正文在宽视口下共用 **820 逻辑像素**的最大排版宽度；输入卡外宽约 880，气泡外框加各自内边距。用户短句用实际显示字体的行宽计算自然宽度，不能以允许汉字断行的 `QTextDocument.idealWidth()` 估算，否则短消息也会换行。窄窗口按可用聊天栏缩小，不允许固定用户气泡宽度超出 viewport；在 Windows 中英混排、emoji、标点、链接、长无空格字符串和 100%–200% DPI 下验证。 |
 | `app/ui/main_window.py::ChatTextEdit.insertFromMimeData` | 现在仅接收 `QImage`，Windows 截图工具/剪贴板可能给 `QPixmap` 或文件 URL。分别处理有效 `QImage`、`QPixmap.toImage()`、受支持的本地文件 URL；保留纯文本和 `Enter`/`Shift+Enter`/IME 预编辑行为。验证中文微软拼音的候选确认不会误发送。拖入文件仍只接受视觉模型，路径含空格/中文。 |
 | `app/ui/image_strip.py`, `message_bubbles.py::OpenImageLabel` | `rounded_thumbnail` 当前按逻辑 `size×size` 画一次，再由高 DPI 屏放大；依实际 `devicePixelRatio` 生成足够像素、设置 pixmap DPR，保留抗锯齿圆角/内侧描边。验证 PNG/JPEG/GIF/WebP、8 张排列和原图打开。 |
-| `app/ui/message_bubbles.py::_MathWebView` | 约 422 行把 `f"{KATEX_DIR.resolve()}/"` 传给 `QUrl.fromLocalFile`，Windows 混合反斜杠与斜杠，且可能有中文/空格。用 `QUrl.fromLocalFile` 从规范化**目录**构造末尾 `/` 的 base URL；核实 HTML 中 `katex.min.css`、`katex.min.js`、所有 WOFF2 相对 URL 的实际加载。保持 `qrc:///qtwebchannel/qwebchannel.js` 可用。分式行高、矩阵/分段、公式横滚、代码复制和长回答内部纵滚须在真实 WebEngine 上验，不能只看 HTML 字符串。 |
+| `app/ui/message_bubbles.py::_MathWebView` | 把 `f"{KATEX_DIR.resolve()}/"` 传给 `QUrl.fromLocalFile`，Windows 混合反斜杠与斜杠，且可能有中文/空格。用 `QUrl.fromLocalFile` 从规范化**目录**构造末尾 `/` 的 base URL；核实 HTML 中 `katex.min.css`、`katex.min.js`、所有 WOFF2 相对 URL 的实际加载。保持 `qrc:///qtwebchannel/qwebchannel.js` 可用。分式行高、矩阵/分段、公式横滚、代码复制须在真实 WebEngine 上验；长回答的纵向滚动已改为外层单条滚动 + 窗口瓦片（见阶段 D.2），页内不得再出现任何独立滚动条。 |
 | `app/ui/harness_page.py` | `QWebEngineProfile` 的 storage/cache 指向可写的用户目录；设置页/消息外链使用 `QDesktopServices` 打开默认浏览器/图片查看器。检查 Windows 防火墙/代理情况下 loopback Web UI，设置更新后旧 profile/cookie 不复用；代码不能把认证 token 画到截图或发到外网。 |
 | `main.py`, `app/ui/icons.py` | 保留 PNG 窗口图标及矢量绘制图标。为打包 EXE 设置 `.ico`；如 Windows 任务栏显示 Python/默认图标，给此应用设置稳定且独有的 AppUserModelID，并对源码/打包态分别测试任务栏分组、Alt+Tab、开始菜单快捷方式。现有 `icon()` 用 3 倍 DPR 绘制，应在 100%–200% 缩放下检查清晰度，包括输入框右上角的展开/收起图标。 |
 | `app/api.py` | 约 414 与 553 行的 Macintosh User-Agent 仅用于搜索页面请求；改为应用自己的中性标识或合理的平台 UA，保持 DDG Lite 解析/Tavily/页面读取与引用测试。API SSE 核心不需要改平台语义。 |
 
 ### 阶段 D.1：流式跟随和动画的原生 Windows 方案
 
-1. **以已显现内容决定可滚动高度。** `RichText` 的普通文本仍用完整 `QTextDocument` 保留 Markdown 格式，但原生控件高度只到最后一个已显现字符所在的行；恢复字符格式时按连续片段批量处理。公式/代码的 WebEngine 页面只报告最后一个已显现字符的底边；`style`、`script`、代码工具栏与 KaTeX 的隐藏语义节点不参与计数。用户看到的首屏不能提前占用完整回答的高度。Windows 上分别用纯文本、连续长段落、代码块、公式和混排实测；对比 `QScrollBar.maximum()` 与已显现正文高度，不能用“透明文字占满页面”模拟键入。Qt 的滚动范围受子控件大小与布局约束，见 [QScrollArea 文档](https://doc.qt.io/qt-6/qscrollarea.html)。
+1. **以已显现内容决定可滚动高度。** `RichText` 运行一条显形前沿（frontier，单位是文档像素）：前沿之下的内容被裁剪，前沿本身带一条渐变幕布，新文字从浅到深浮现。普通文本用完整 `QTextDocument` 保留 Markdown 格式，控件高度只到前沿；公式/代码的 WebEngine 面只负责排版，前沿由宿主逐帧推进，页面本身不再有任何逐字符状态。用户看到的首屏不能提前占用完整回答的高度。Windows 上分别用纯文本、连续长段落、代码块、公式和混排实测；对比 `QScrollBar.maximum()` 与前沿高度，不能用“透明文字占满页面”模拟键入。Qt 的滚动范围受子控件大小与布局约束，见 [QScrollArea 文档](https://doc.qt.io/qt-6/qscrollarea.html)。
 2. **统一人工滚动优先级。** `ChatView` 的 viewport、内嵌 `QTextBrowser`、WebEngine 转发的滚轮、触控板像素滚动，以及滚动条拖动都须暂停自动跟随。向上、向下都算用户介入；程序自己移动滚动条不得误判成用户操作。继续跟随按钮启动约 16 ms 一帧的加速—减速追赶，目标在回答继续生长时动态更新；按钮点击的同一帧不得直接把 `QScrollBar.value()` 设为 `maximum()`。追赶过程中再次滚轮操作立即取消追赶并保留用户指定视角。原生 Windows Precision Touchpad 要同时测 `pixelDelta`、`angleDelta` 和惯性滚动阶段，避免一次手势先暂停又被后续异步布局重新开启。
+   * 跟随期间每帧必须至少补上本帧内容增长的高度（`ChatView._advance_follow_scroll` 里的 `growth` 项），否则前沿会以最快 130 px/帧 的速度滑出视口底部；这是“最下方始终跟随最新浮现文字”的唯一判据，验收时对比 `QScrollBar.maximum() - value()` 是否长期为 0。
 3. **让输入区和侧栏逐帧更新，但避免重复重排正文。** 输入框的 84/252 高度动画由精准 16 ms 定时器驱动非线性缓动，`ChatWorkspace` 每帧用卡片真实高度更新底部净空与继续跟随按钮位置；结束后再同步一次布局，防止最后 1–2 像素丢帧。侧栏 280/56 宽度过渡也用非线性约 60fps 目标，导航页只在过渡起点或终点切换，宽度变化期间暂停富文本气泡逐帧重排，结束时统一按新宽度换行。Windows 的计时器可能因消息循环、WebEngine 绘制和显示器刷新率合并帧；记录真实帧时间与屏幕视频，若仍卡顿，先剖析主线程排版和原生 WebEngine 合成，不能靠缩短动画或隐藏内容掩盖停顿。
 4. **低高度和高 DPI 是新边界。** 252 像素展开档在最小 920×640 逻辑窗口占去更大空间；再叠加图片条、系统标题栏和 150%/200% 缩放，必须确认输入工具栏、发送/停止键、继续跟随键和最后一行正文均可见且可点击。欢迎页居中以实际卡片高度重新定位；展开输入框时收起欢迎页建议按钮，避免它们被高卡片盖住，收起后恢复。DPI 改变、窗口缩窄、侧栏动画中反复点击展开键、流式输出时切换深浅主题，都要验证卡片不盖住消息、滚动条不跳尾、侧栏不闪换页。
 5. **统一输入和输出的最大行宽。** 宽视口下用 `MESSAGE_CONTENT_MAX_WIDTH == 820` 作为三处可见文字区的单一目标：输入编辑器 viewport、AI `RichText`、用户 `RichText` 都实际量到 820 逻辑像素；不能只把三个外框设成同宽，因为它们的内边距、图标与边框不同。用户短句须根据真实字体度量保持单行，长句到 820 才换行；窗口变窄后用户气泡也要缩到可用栏宽。Windows 字体替换、125%/150% DPI、文本插入图片、侧栏运动后重新测几何和断行。
+
+### 阶段 D.2：单层滚动、缓冲与浮现动画（必须整套移植，不可退回嵌套滚动）
+
+1. **只保留一个滚动条。** AI 回答不再使用“外层滚到底 → 内层页面继续滚”的嵌套方案。`app/ui/message_bubbles.py::RichText` 把一条长回答切成若干**窗口瓦片**（`_MathWebView`，高度上限 `_surface_height_limit()` = `min(6000, 8192 / devicePixelRatio)` 逻辑像素），每块瓦片渲染同一份文档并用 `window.setDeepSeekOffset(y)` 把根节点平移 `-y`，因此瓦片只显示文档的 `[y, y + 高度)` 片段；瓦片按 `index * 瓦片高` 无缝堆叠，外层 `ChatView` 是唯一滚动条。Chromium 会把超高表面的尾部静默裁掉（实测 macOS 上超过 16384 设备像素即出现空白），所以不能靠“把上限调大”来解决长回答。
+2. **模型输出先进缓存。** 网络分片只写入 `StreamContext.content` 与 `RichText._source`；`app/markdown.py::StreamingMarkdown` 以 16 ms 节拍把缓存增量渲染成 DOM：已完成块追加到锚点之前（`setDeepSeekStream.stable`），未完成块只重绘尾巴（`tail`），代码围栏内已确定的整行以纯文本追加进现有 `<pre><code>`（`code`），仍在输入的最后一行单独作为 `codeTail` 替换显示。渲染器对任意前缀与一次性整篇渲染逐字节等价，Windows 上必须保留这条性质与对应测试。
+3. **浮现动画由宿主逐帧驱动。** 前沿（`RichText._frontier`）以精准 16 ms 定时器推进：`step = clamp(backlog * 0.16, 2, 130)` 像素，`limit = 文档高度 + 700` 像素；视口高度 = `min(前沿, 文档高度)`，前沿之上最后一段用 `_RevealCurtain`（`QLinearGradient`，颜色取当帧主题的 `canvas`）从透明渐到不透明，形成“大面积由浅到深浮现”。**所有逐帧工作都在 Qt 侧**：Chromium 页面在两次 DOM 更新之间完全不改样式，因此不会有“每帧重传表面导致掉帧”的问题。Windows 上不要改成在页面内用 CSS 逐字动画；实测那会把帧率压到 50 fps 以下，且随答案长度线性恶化。
+4. **稳态与结束。** 流结束（`complete_stream()`）后前沿继续滑出幕布并触发 `revealFinished`；此时按整篇重新渲染一次（`render_body(source)`）并复用现有瓦片重绘（`_paint_tile`，不重建 WebEngine 页面），保证最终 DOM 与一次性渲染完全一致，任何中途的批量边界、未闭合公式或后置引用定义都不会留下陈旧片段。
+5. **Windows 必测项。**
+   * 在 100%/150%/200% 缩放下确认瓦片高度随 DPI 变化后仍无缝：`tile.geometry().y() == index * tile_height`，各瓦片 `documentHeight` 一致，接缝处无空白带。
+   * 用长代码回答（≥300 行）验证 `code`/`codeTail` 路径：滚动到底部时最后一行必须在屏幕内，且与整篇渲染逐字一致。
+   * 用干净机器 + 集显验证 60 fps：在瓦片内注入 rAF 采样（参考仓库外 QA 脚本），静态基线应约 60 fps，流式期间允许偶发单帧丢弃但不得持续低于 ~55 fps。
+   * 深色主题下幕布颜色必须取 `colors(theme)["canvas"]`，否则渐变会露出白色块。
+   * `wheel`/触控板滚动仍必须由页面转交宿主（`bridge.scrollVertically`），页面自身 `overflow: hidden` 且 `window.scrollY` 恒为 0；验收时逐条确认瓦片内没有任何独立滚动。
 
 数据层：`app/config.py` 的 `Path.home()/".deepseek_chat_gui"`、`DEEPSEEK_CHAT_GUI_HOME`、`app/storage.py` 的 `Path`/`shutil.copy2` 与 JSON `.replace()` 可以留存；在 Windows 做路径含中文/空格、只读目录、已有 `.tmp`、无权限和重启后持久化测试。当前媒体在 `conversations.json` 里是绝对路径：**Windows 新会话**照旧可用；如果要求把 Mac 旧数据直接拷到 Windows，需增加 `ConversationStore.resolve_media_path()` 及兼容旧记录的迁移：只映射位于旧 `media/<conversation-id>/` 下的文件到新 `MEDIA_DIR`，保留原 JSON 备份且每步校验，更新展示/重发图片用到的 `app/api.py`、`message_bubbles.py` 调用；不要对任意路径做字符串替换，也不要自动删除源数据。此跨设备数据迁移是独立验收场景。
 
@@ -173,6 +187,7 @@ $env:DEEPSEEK_CHAT_GUI_HOME = Join-Path (Get-Location) '.tmp/windows-port/test-d
 
 - Windows x64 源码运行、自动测试、真实桌面 UI 测试、onedir、干净机 ZIP 五关全绿；测试数量非零，未跳过真实 WebEngine/Harness 验收。
 - 两会话以上的并行输出、后台继续生成、按会话恢复草稿及图片、侧栏运行标记、后台完成/失败/删除与退出收束均通过自动测试和真实桌面操作；无跨会话回复或草稿串写。
+- 单层滚动合同通过：超长回答（含 ≥300 行代码块）在 100%/150%/200% 缩放下都只有外层一条滚动条，任意时刻 `QScrollBar.maximum() - value() == 0`（跟随态），页内 `window.scrollY` 恒为 0，瓦片接缝无空白带；浮现动画在实机 60 Hz 下不低于约 55 fps，深浅主题幕布颜色与画布一致。
 - 每项功能合同有测试或带时间/构建号的人工记录，视觉矩阵有截图、差异清单与复验结果；没有遮挡、截断、空白、无法点击/复制/滚动、丢图标或不合理闪烁。
 - Mac 分支的 `.spec`、供应/DMG 脚本保留，能在 macOS CI/真机回归；Windows 分支不声称已通过未经执行的 macOS 测试。
 - 运行包里没有 Darwin 原生二进制冒充 Windows 依赖；无全局 Node/Python 前提；没有将 API Key/token 打进发布包、日志或截图。发布物名称/架构/版本/校验和与实际内容一致。

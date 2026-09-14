@@ -34,7 +34,6 @@ from PySide6.QtGui import (
     QPixmap,
     QTextCursor,
     QTextDocument,
-    QTextCharFormat,
 )
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
@@ -48,7 +47,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QScrollArea,
     QSizePolicy,
-    QStackedLayout,
     QTextBrowser,
     QToolButton,
     QVBoxLayout,
@@ -56,9 +54,10 @@ from PySide6.QtWidgets import (
 )
 
 from .. import ASSETS_DIR
-from ..markdown import to_html
+from ..markdown import StreamingMarkdown, render_body, to_html
 from .controls import build_flat_menu
 from .image_strip import rounded_thumbnail
+from .math_shell import MATH_WEB_SHELL
 from .icons import apply_icon, tint_pixmap
 from .theme import CHAT_BUBBLE_RADIUS, MESSAGE_CONTENT_MAX_WIDTH, colors
 
@@ -72,336 +71,7 @@ WEB_SURFACE_TEXTURE_LIMIT = 8192
 WEB_SURFACE_MAX_HEIGHT = 6000
 
 
-_MATH_WEB_SHELL = r"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="katex.min.css">
-  <style>
-    html, body {
-      box-sizing: border-box;
-      width: 100%;
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      background: transparent;
-    }
-    #content-root {
-      display: flow-root;
-      box-sizing: border-box;
-      width: 100%;
-      min-height: 1px;
-      margin: 0;
-      padding: 0;
-      background: transparent;
-      cursor: text;
-    }
-    html, body { cursor: text; }
-    a, button, .code-copy { cursor: pointer; }
-  </style>
-</head>
-<body>
-  <main id="content-root"></main>
-  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-  <script src="katex.min.js"></script>
-  <script>
-    (() => {
-      const root = document.getElementById("content-root");
-      let bridge = null;
-
-      const fullHeight = () => Math.max(
-        1,
-        Math.ceil(root.getBoundingClientRect().height)
-      );
-      let revealedCount = 0;
-      const measuredHeight = () => {
-        if (!Number.isFinite(revealLength)) return fullHeight();
-        if (!revealedCount) return 1;
-        const last = revealCharacters[revealedCount - 1];
-        if (!last) return fullHeight();
-        return Math.max(1, Math.ceil(
-          last.getBoundingClientRect().bottom
-          - root.getBoundingClientRect().top + 3
-        ));
-      };
-
-      // A very long answer may exceed the maximum safe texture height of the
-      // embedded page.  In that case the native surface is intentionally
-      // clamped, so let the page scroll its own overflow instead of clipping
-      // the tail of the answer.  Short answers keep the page overflow hidden
-      // and continue to use the outer chat lane as their only scroller.
-      let internalScroll = false;
-      const syncScrollMode = () => {
-        internalScroll = measuredHeight() > window.innerHeight + 2;
-        const value = internalScroll ? "auto" : "hidden";
-        document.documentElement.style.overflowY = value;
-        document.body.style.overflowY = value;
-        return internalScroll;
-      };
-
-      const refreshOverflow = () => {
-        root.querySelectorAll(".math-display-shell").forEach((shell) => {
-          const overflowing = shell.scrollWidth > shell.clientWidth + 2;
-          shell.classList.toggle("is-overflowing", overflowing);
-          shell.setAttribute("data-overflowing", overflowing ? "true" : "false");
-          shell.setAttribute("tabindex", overflowing ? "0" : "-1");
-          shell.setAttribute(
-            "aria-label",
-            overflowing ? "数学公式，可横向滚动查看完整内容" : "数学公式"
-          );
-        });
-        root.querySelectorAll(".math-inline").forEach((inline) => {
-          const overflowing = inline.scrollWidth > inline.clientWidth + 4;
-          inline.classList.toggle("is-overflowing", overflowing);
-          inline.setAttribute("tabindex", overflowing ? "0" : "-1");
-        });
-      };
-
-      let revealLength = Number.POSITIVE_INFINITY;
-      let revealTotalLength = 0;
-      let revealCharacters = [];
-
-      const shouldSkipReveal = (node) => {
-        const element = node.parentElement;
-        return element && element.closest(
-          ".code-toolbar, .katex-mathml, .math-source, style, script"
-        );
-      };
-
-      const prepareReveal = () => {
-        revealCharacters = [];
-        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        const textNodes = [];
-        let node = walker.nextNode();
-        while (node) {
-          if (node.nodeValue && !shouldSkipReveal(node)) {
-            textNodes.push(node);
-          }
-          node = walker.nextNode();
-        }
-
-        textNodes.forEach((textNode) => {
-          if (!textNode.parentNode || shouldSkipReveal(textNode)) return;
-          const fragment = document.createDocumentFragment();
-          [...textNode.nodeValue].forEach((character) => {
-            const span = document.createElement("span");
-            span.className = "deepseek-type-char";
-            span.textContent = character;
-            fragment.appendChild(span);
-            revealCharacters.push(span);
-          });
-          textNode.parentNode.replaceChild(fragment, textNode);
-        });
-      };
-
-      const applyReveal = () => {
-        const visible = Number.isFinite(revealLength)
-          ? revealTotalLength > 0
-            ? Math.min(
-                revealCharacters.length,
-                Math.ceil(
-                  revealCharacters.length
-                  * Math.max(0, revealLength)
-                  / revealTotalLength
-                )
-              )
-            : Math.max(0, Math.floor(revealLength))
-          : revealCharacters.length;
-        if (visible > revealedCount) {
-          for (let index = revealedCount; index < visible; index++) {
-            revealCharacters[index].style.visibility = "visible";
-          }
-        } else {
-          for (let index = visible; index < revealedCount; index++) {
-            revealCharacters[index].style.visibility = "hidden";
-          }
-        }
-        revealedCount = visible;
-      };
-
-      const reportLayout = () => {
-        refreshOverflow();
-        syncScrollMode();
-        const height = measuredHeight();
-        if (bridge) bridge.reportHeight(height);
-        return height;
-      };
-
-      const renderFormulas = () => {
-        root.querySelectorAll("[data-tex]").forEach((node) => {
-          const expression = node.getAttribute("data-tex") || "";
-          try {
-            if (typeof katex === "undefined") {
-              throw new Error("KaTeX is unavailable");
-            }
-            katex.render(expression, node, {
-              displayMode: node.getAttribute("data-display") === "true",
-              output: "htmlAndMathml",
-              throwOnError: false,
-              strict: "ignore",
-              trust: false,
-              maxSize: 12,
-              maxExpand: 1000
-            });
-          } catch (error) {
-            node.classList.add("katex-error");
-            node.textContent = expression;
-          }
-        });
-      };
-
-      window.setDeepSeekContent = (markup, reveal, total) => {
-        root.innerHTML = markup;
-        renderFormulas();
-        revealLength = Number.isFinite(reveal)
-          ? Math.max(0, Math.floor(reveal))
-          : Number.POSITIVE_INFINITY;
-        revealTotalLength = Number.isFinite(total)
-          ? Math.max(0, Math.floor(total))
-          : 0;
-        if (Number.isFinite(revealLength)) {
-          prepareReveal();
-          revealCharacters.forEach((character) => {
-            character.style.visibility = "hidden";
-          });
-          revealedCount = 0;
-          applyReveal();
-        } else {
-          revealCharacters = [];
-          revealedCount = 0;
-        }
-        reportLayout();
-        requestAnimationFrame(reportLayout);
-        if (document.fonts && document.fonts.ready) {
-          document.fonts.ready.then(reportLayout);
-        }
-        return measuredHeight();
-      };
-      window.refreshDeepSeekLayout = reportLayout;
-      window.setDeepSeekReveal = (reveal, total) => {
-        revealLength = Number.isFinite(reveal)
-          ? Math.max(0, Math.floor(reveal))
-          : Number.POSITIVE_INFINITY;
-        if (Number.isFinite(total)) {
-          revealTotalLength = Math.max(0, Math.floor(total));
-        }
-        applyReveal();
-        reportLayout();
-      };
-
-      const caretAt = (x, y) => {
-        const px = Math.max(0, Math.min(window.innerWidth - 1, x));
-        const py = Math.max(0, Math.min(window.innerHeight - 1, y));
-        if (document.caretPositionFromPoint) {
-          const caret = document.caretPositionFromPoint(px, py);
-          if (caret) return { node: caret.offsetNode, offset: caret.offset };
-        }
-        const range = document.caretRangeFromPoint(px, py);
-        return range
-          ? { node: range.startContainer, offset: range.startOffset }
-          : null;
-      };
-
-      let dragAnchor = null;
-      document.addEventListener("mousedown", (event) => {
-        if (event.button !== 0 || (
-          event.target instanceof Element && event.target.closest(".code-copy")
-        )) return;
-        dragAnchor = caretAt(event.clientX, event.clientY);
-        if (!dragAnchor || !root.contains(dragAnchor.node)) return;
-        if (bridge) bridge.startSelectionDrag(event.clientX, event.clientY);
-      });
-      document.addEventListener("mousemove", (event) => {
-        if (dragAnchor && (event.buttons & 1) && bridge) {
-          bridge.moveSelectionDrag(event.clientX, event.clientY);
-        }
-      });
-      const finishSelectionDrag = () => {
-        if (!dragAnchor) return;
-        dragAnchor = null;
-        if (bridge) bridge.finishSelectionDrag();
-      };
-      window.addEventListener("mouseup", finishSelectionDrag);
-      window.addEventListener("blur", finishSelectionDrag);
-
-      window.autoScrollSelection = (delta, x, y) => {
-        if (!dragAnchor) return;
-        if (internalScroll && delta) window.scrollBy(0, delta);
-        const caret = caretAt(x, y);
-        if (!caret || !root.contains(caret.node)) return;
-        window.getSelection().setBaseAndExtent(
-          dragAnchor.node, dragAnchor.offset, caret.node, caret.offset
-        );
-      };
-
-      document.addEventListener("click", (event) => {
-        const button = event.target instanceof Element
-          ? event.target.closest(".code-copy")
-          : null;
-        if (!button) return;
-        const block = button.closest(".code-block");
-        const code = block ? block.querySelector("pre code") : null;
-        if (!code || !bridge) return;
-        bridge.copyText(code.textContent || "");
-        button.textContent = "已复制";
-        button.classList.add("is-copied");
-        window.setTimeout(() => {
-          button.textContent = "复制";
-          button.classList.remove("is-copied");
-        }, 1400);
-      });
-
-      if (typeof QWebChannel !== "undefined" && typeof qt !== "undefined") {
-        new QWebChannel(qt.webChannelTransport, (channel) => {
-          bridge = channel.objects.mathBridge;
-          reportLayout();
-        });
-      }
-
-      new ResizeObserver(() => requestAnimationFrame(reportLayout)).observe(root);
-      window.addEventListener("resize", () => requestAnimationFrame(reportLayout));
-      document.addEventListener("wheel", (event) => {
-        if (internalScroll) {
-          const documentElement = document.documentElement;
-          const body = document.body;
-          const scrollTop = Math.max(
-            window.scrollY || 0,
-            documentElement.scrollTop || 0,
-            body.scrollTop || 0
-          );
-          const contentHeight = Math.max(
-            documentElement.scrollHeight || 0,
-            body.scrollHeight || 0
-          );
-          const maxScroll = Math.max(0, contentHeight - window.innerHeight);
-          const atEdge = (
-            (event.deltaY < 0 && scrollTop <= 0)
-            || (event.deltaY > 0 && scrollTop >= maxScroll - 1)
-          );
-          // Keep the gesture inside a clamped answer until it reaches an
-          // edge; only then should the outer message lane consume it.
-          if (!atEdge) return;
-        }
-        const horizontalRegion = event.target instanceof Element
-          ? event.target.closest(
-              ".math-display-shell, .math-inline.is-overflowing"
-            )
-          : null;
-        if (horizontalRegion && event.shiftKey && event.deltaY !== 0) {
-          horizontalRegion.scrollLeft += event.deltaY;
-          event.preventDefault();
-          return;
-        }
-        if (!bridge || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-        bridge.scrollVertically(event.deltaY);
-        event.preventDefault();
-      }, { passive: false });
-    })();
-  </script>
-</body>
-</html>
-"""
+_MATH_WEB_SHELL = MATH_WEB_SHELL
 
 
 class _MathPage(QWebEnginePage):
@@ -416,16 +86,19 @@ class _MathPage(QWebEnginePage):
 
 
 class _MathBridge(QObject):
-    heightReported = Signal(int)
+    layoutReported = Signal(int, int)
     verticalScrollRequested = Signal(float)
     copyRequested = Signal(str)
     selectionDragStarted = Signal(float, float)
     selectionDragMoved = Signal(float, float)
     selectionDragFinished = Signal()
 
-    @Slot(float)
-    def reportHeight(self, height: float) -> None:
-        self.heightReported.emit(max(1, round(height)))
+    @Slot(float, float)
+    def reportLayout(self, height: float, changed_top: float) -> None:
+        self.layoutReported.emit(
+            max(1, round(height)),
+            max(0, round(changed_top)),
+        )
 
     @Slot(float)
     def scrollVertically(self, delta: float) -> None:
@@ -451,19 +124,26 @@ class _MathBridge(QObject):
 class _MathWebView(QWebEngineView):
     contentHeightChanged = Signal(int)
     contentRendered = Signal()
+    layoutReported = Signal(int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setProperty("skipCustomTooltipScan", True)
         self._disposed = False
         self._ready = False
-        self._pending_html = ""
-        self._pending_reveal_characters: int | None = None
-        self._pending_reveal_total_characters: int | None = None
+        self._pending_document: dict | None = None
+        self._pending_calls: list[tuple[str, int]] = []
         self._generation = 0
+        self._call_serial = 0
         self._rendered_generation = -1
+        self._document_height = 0
+        self._changed_top = 0
+        self._offset = 0
+        self._stream_started = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(22)
+        # The owning RichText positions tiles explicitly; it must stay free to
+        # resize them, so no fixed height is set here.
+        self.setMinimumHeight(1)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setCursor(Qt.CursorShape.IBeamCursor)
         self.setStyleSheet("background:transparent;border:none;")
@@ -491,7 +171,7 @@ class _MathWebView(QWebEngineView):
         )
 
         self._bridge = _MathBridge(self)
-        self._bridge.heightReported.connect(self._apply_content_height)
+        self._bridge.layoutReported.connect(self._on_layout_reported)
         self._bridge.verticalScrollRequested.connect(self._forward_vertical_scroll)
         self._copy_to_clipboard = lambda text: QApplication.clipboard().setText(text)
         self._bridge.copyRequested.connect(self._copy_to_clipboard)
@@ -510,96 +190,188 @@ class _MathWebView(QWebEngineView):
         base_url = QUrl.fromLocalFile(f"{KATEX_DIR.resolve()}/")
         self.setHtml(_MATH_WEB_SHELL, base_url)
 
-    def set_content(
-        self,
-        body: str,
-        reveal_characters: int | None = None,
-        reveal_total_characters: int | None = None,
-    ) -> None:
-        if self._disposed:
-            return
-        self._pending_html = body
-        self._pending_reveal_characters = reveal_characters
-        self._pending_reveal_total_characters = reveal_total_characters
-        self._generation += 1
-        if self._ready:
-            self._render_pending_content()
+    @property
+    def document_height(self) -> int:
+        """Natural height of the whole rendered answer, in logical pixels."""
 
-    def set_reveal_characters(
+        return max(0, self._document_height)
+
+    @property
+    def changed_top(self) -> int:
+        """Document y where this tile's DOM last changed."""
+
+        return max(0, self._changed_top)
+
+    @property
+    def offset(self) -> int:
+        return self._offset
+
+    def set_document(
         self,
-        characters: int | None,
-        total_characters: int | None = None,
+        style: str,
+        stable: str,
+        tail: str,
+        *,
+        code_tail: str = "",
+        offset: int | None = None,
     ) -> None:
+        """Replace this tile's whole document."""
+
         if self._disposed:
             return
-        self._pending_reveal_characters = characters
-        if total_characters is not None:
-            self._pending_reveal_total_characters = total_characters
-        if not self._ready or self.page() is None:
+        self._generation += 1
+        self._stream_started = False
+        self._pending_document = {
+            "style": style,
+            "stable": stable,
+            "tail": tail,
+            "codeTail": code_tail,
+        }
+        self._pending_calls.clear()
+        if offset is not None:
+            self._offset = int(offset)
+        if self._ready:
+            self._render_pending_document()
+
+    def push_stream(
+        self,
+        stable_delta: str,
+        tail: str,
+        *,
+        code_delta: str = "",
+        code_tail: str = "",
+        composed_stable: str = "",
+    ) -> None:
+        """Append newly frozen HTML and swap the live tail of this tile."""
+
+        if self._disposed:
             return
-        reveal = (
-            "null"
-            if characters is None
-            else str(max(0, int(characters)))
+        if self._pending_document is not None or not self._stream_started:
+            # The document has not been painted yet; fold the growth into it.
+            pending = self._pending_document
+            if pending is not None:
+                pending["stable"] = composed_stable or (
+                    pending.get("stable", "") + (stable_delta or "")
+                )
+                pending["tail"] = tail
+                pending["codeTail"] = code_tail
+            return
+        data = {
+            "stable": stable_delta or "",
+            "code": code_delta or "",
+            "codeTail": code_tail or "",
+            "tail": tail or "",
+            "hasTail": True,
+        }
+        payload = json.dumps(data)
+        script = (
+            f"window.setDeepSeekStream({json.dumps(payload)})"
         )
-        total = (
-            "null"
-            if self._pending_reveal_total_characters is None
-            else str(max(0, int(self._pending_reveal_total_characters)))
-        )
-        self.page().runJavaScript(
-            f"window.setDeepSeekReveal({reveal}, {total})"
-        )
+        self._run(script)
+
+    def set_offset(self, offset: int) -> None:
+        """Show rows ``[offset, offset + height)`` of the document."""
+
+        if self._disposed:
+            return
+        offset = int(offset)
+        if offset == self._offset:
+            return
+        self._offset = offset
+        self._run(f"window.setDeepSeekOffset({offset})")
 
     def _on_load_finished(self, succeeded: bool) -> None:
         if self._disposed:
             return
         self._ready = succeeded
         if succeeded:
-            self._render_pending_content()
+            self._render_pending_document()
 
-    def _render_pending_content(self) -> None:
+    def _run(self, script: str) -> None:
         if self._disposed or not self._ready or self.page() is None:
+            self._pending_calls.append((script, self._generation))
             return
-        generation = self._generation
-        payload = json.dumps(self._pending_html)
-        reveal = (
-            "null"
-            if self._pending_reveal_characters is None
-            else str(max(0, int(self._pending_reveal_characters)))
-        )
-        total = (
-            "null"
-            if self._pending_reveal_total_characters is None
-            else str(max(0, int(self._pending_reveal_total_characters)))
-        )
-        script = f"window.setDeepSeekContent({payload}, {reveal}, {total})"
+        self._call_serial += 1
+        serial = self._call_serial
         self.page().runJavaScript(
             script,
-            lambda height, current=generation: self._content_applied(current, height),
+            lambda value, current=serial: self._call_finished(current, value),
         )
 
-    def _content_applied(self, generation: int, height) -> None:
-        if self._disposed or generation != self._generation:
+    def _render_pending_document(self) -> None:
+        if self._disposed or not self._ready or self.page() is None:
             return
-        if isinstance(height, (int, float)):
-            self._apply_content_height(round(height))
-        if self._rendered_generation != generation:
-            self._rendered_generation = generation
-            self.contentRendered.emit()
+        pending = self._pending_document
+        if pending is None:
+            self._flush_pending_calls()
+            return
+        self._pending_document = None
+        payload = json.dumps(
+            {
+                "style": pending["style"],
+                "stable": pending["stable"],
+                "tail": pending["tail"],
+                "codeTail": pending.get("codeTail", ""),
+            }
+        )
+        script = (
+            f"window.setDeepSeekOffset({int(self._offset)});"
+            f"window.setDeepSeekDocument({json.dumps(payload)})"
+        )
+        self._stream_started = True
+        self._run(script)
+        self._flush_pending_calls()
 
-    @Slot(int)
-    def _apply_content_height(self, height: int) -> None:
+    def _flush_pending_calls(self) -> None:
+        if not self._pending_calls:
+            return
+        pending, self._pending_calls = self._pending_calls, []
+        for script, _generation in pending:
+            self._run(script)
+
+    def _call_finished(self, serial: int, value) -> None:
+        if self._disposed or serial != self._call_serial:
+            return
+        if isinstance(value, str) and value.startswith("{"):
+            try:
+                data = json.loads(value)
+            except ValueError:
+                data = None
+            if isinstance(data, dict):
+                self._document_height = max(
+                    1, int(data.get("documentHeight") or 0)
+                )
+                self._changed_top = max(0, int(data.get("changedTop") or 0))
+                self.layoutReported.emit(
+                    self._document_height,
+                    self._changed_top,
+                )
+                self._rendered_generation = self._generation
+        self.contentRendered.emit()
+
+    @Slot(int, int)
+    def _on_layout_reported(self, height: int, changed_top: int) -> None:
         if self._disposed:
             return
-        natural = max(22, min(int(height) + 1, 100_000))
-        target = min(natural, self._surface_height_limit())
-        if abs(self.height() - target) > 1:
-            self.setFixedHeight(target)
-            self.contentHeightChanged.emit(target)
+        if height <= 1 and self._document_height <= 1:
+            # A page reports its still-unset body before the document call
+            # lands; that empty state must never reach the lane.
+            return
+        self._document_height = max(1, int(height))
+        self._changed_top = max(0, int(changed_top))
+        self._rendered_generation = self._generation
+        self.layoutReported.emit(
+            self._document_height,
+            self._changed_top,
+        )
 
     def _surface_height_limit(self) -> int:
-        """Largest safe inline surface, in logical pixels, for the screen."""
+        """Largest safe web surface, in logical pixels, for this screen.
+
+        Chromium reduces any surface taller than the GPU texture budget, which
+        silently blanks the tail of the page, so one answer is painted by
+        several tiles of at most this height instead.
+        """
 
         screen = self.screen() or QGuiApplication.primaryScreen()
         ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
@@ -694,9 +466,6 @@ class _MathWebView(QWebEngineView):
             page.triggerAction(QWebEnginePage.WebAction.SelectAll)
 
     def resizeEvent(self, event) -> None:
-        limit = self._surface_height_limit()
-        if self.height() > limit:
-            self.setFixedHeight(limit)
         super().resizeEvent(event)
         if self._ready and not self._disposed and not self._layout_refresh_timer.isActive():
             self._layout_refresh_timer.start()
@@ -717,13 +486,15 @@ class _MathWebView(QWebEngineView):
         self._disposed = True
         self._ready = False
         self._generation += 1
+        self._pending_document = None
+        self._pending_calls.clear()
         self._layout_refresh_timer.stop()
         try:
             self.loadFinished.disconnect(self._on_load_finished)
         except (RuntimeError, TypeError):
             pass
         for signal, slot in (
-            (self._bridge.heightReported, self._apply_content_height),
+            (self._bridge.layoutReported, self._on_layout_reported),
             (self._bridge.verticalScrollRequested, self._forward_vertical_scroll),
             (self._bridge.copyRequested, self._copy_to_clipboard),
             (self._bridge.selectionDragStarted, self._start_selection_drag),
@@ -820,25 +591,146 @@ class MessageTextBrowser(QTextBrowser):
             self.selectAll()
 
 
+class _RevealCurtain(QWidget):
+    """Soft edge that fades the newest message text from light to dark.
+
+    The reveal frontier itself is animated by resizing the message viewport,
+    which Qt composites without repainting the embedded Chromium surfaces.
+    This strip only paints the gradient that makes the emerging text look like
+    it is still developing instead of ending in a hard cut.
+    """
+
+    MIN_BAND = 42
+    MAX_BAND = 260
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._color = QColor("#FFFFFF")
+        self._band = 90
+        self.hide()
+
+    def set_color(self, color: QColor) -> None:
+        if color == self._color:
+            return
+        self._color = QColor(color)
+        self.update()
+
+    def set_band(self, band: int) -> None:
+        band = max(self.MIN_BAND, min(self.MAX_BAND, int(band)))
+        if band == self._band:
+            return
+        self._band = band
+
+    @property
+    def band(self) -> int:
+        return self._band
+
+    def paintEvent(self, event) -> None:
+        del event
+        if self.height() <= 0:
+            return
+        painter = QPainter(self)
+        gradient = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
+        transparent = QColor(self._color)
+        transparent.setAlpha(0)
+        soft = QColor(self._color)
+        soft.setAlpha(210)
+        opaque = QColor(self._color)
+        gradient.setColorAt(0.0, transparent)
+        gradient.setColorAt(0.55, soft)
+        gradient.setColorAt(1.0, opaque)
+        painter.fillRect(self.rect(), gradient)
+        painter.end()
+
+
+def _surface_height_limit(widget: QWidget) -> int:
+    """Largest web surface, in logical pixels, this screen can composite.
+
+    Chromium silently reduces anything taller than the GPU texture budget,
+    which blanks the tail of the page, so a long answer is painted by several
+    tiles of at most this height instead of one oversized surface.
+    """
+
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
+    return max(
+        1200,
+        min(
+            WEB_SURFACE_MAX_HEIGHT,
+            int(WEB_SURFACE_TEXTURE_LIMIT / max(1.0, ratio)),
+        ),
+    )
+
+
+def _needs_web_renderer(html: str) -> bool:
+    """True when a body needs KaTeX or a code toolbar from Chromium."""
+
+    return "data-tex=" in html or "data-code-block=" in html
+
+
+def _split_rendered_html(rendered: str) -> tuple[str, str]:
+    """Split a :func:`to_html` payload into its style block and inner body."""
+
+    marker = '<div class="markdown-body">'
+    index = rendered.find(marker)
+    if index < 0:
+        return "", rendered
+    remainder = rendered[index + len(marker) :]
+    end = remainder.rfind("</div>")
+    if end >= 0:
+        remainder = remainder[:end]
+    return rendered[:index], remainder
+
+
 class RichText(QWidget):
     """Fast QTextBrowser for ordinary text, KaTeX web layout only when needed."""
 
     heightChanged = Signal()
+    revealFinished = Signal()
+
+    # The reveal frontier walks the answer at display refresh rate.  It is
+    # animated by the host - growing the message viewport and fading its edge
+    # with a native curtain - so no Chromium surface has to change per frame
+    # and the newest text still emerges as a large, soft, darkening area.
+    REVEAL_CATCH_UP = 0.16
+    REVEAL_MIN_STEP_PX = 2.0
+    # Fast enough to feel immediate, slow enough that the lane can keep the
+    # newest text pinned to the bottom of the viewport while following.
+    REVEAL_MAX_STEP_PX = 130.0
+    # The frontier may glide this far past the rendered text, which keeps it
+    # moving smoothly even though the DOM itself is updated in batches.
+    REVEAL_SETTLE_ALLOWANCE = 700.0
+    REVEAL_BAND_PER_PIXEL = 2.5
+    # The DOM is kept barely ahead of the frontier, so the reveal can advance
+    # on every display frame instead of jumping when a batch lands.
+    STREAM_RENDER_INTERVAL_MS = 16
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._theme = "light"
+        self._disposed = False
         self._html = ""
+        self._source = ""
         self._uses_math = False
-        self._web_view: _MathWebView | None = None
-        self._reveal_characters: int | None = None
-        self._reveal_total_characters: int | None = None
-        self._text_formats: list[tuple[int, int, QTextCharFormat]] = []
-        self._applied_reveal_characters = 0
+        self._renderer = StreamingMarkdown()
+        self._style_html = ""
+        self._stable_html = ""
+        self._tail_html = ""
+        self._tiles: list[_MathWebView] = []
+        self._document_height = 0
+        self._changes_from = 0
+        self._streaming = False
+        self._finished = False
+        self._stream_dirty = False
+        self._reveal_active = False
+        self._frontier = 0.0
+        self._repaint_tiles = False
 
-        self._stack = QStackedLayout(self)
-        self._stack.setContentsMargins(0, 0, 0, 0)
         self._text_view = MessageTextBrowser()
+        self._text_view.setParent(self)
         self._text_view.setFrameShape(QFrame.Shape.NoFrame)
         self._text_view.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -849,7 +741,7 @@ class RichText(QWidget):
         self._text_view.setOpenExternalLinks(True)
         self._text_view.document().setDocumentMargin(0)
         self._text_view.setStyleSheet("background:transparent;border:none;")
-        self._stack.addWidget(self._text_view)
+        self._text_view.setGeometry(0, 0, 1, 1)
 
         self._fit_timer = QTimer(self)
         self._fit_timer.setSingleShot(True)
@@ -857,22 +749,35 @@ class RichText(QWidget):
         self._fit_timer.timeout.connect(self._fit_text_height)
         self._text_view.document().contentsChanged.connect(self._schedule_fit)
 
-    def dispose(self) -> None:
-        """Retire any Chromium surface before its owning bubble is deleted."""
+        self._stream_timer = QTimer(self)
+        self._stream_timer.setSingleShot(True)
+        self._stream_timer.setInterval(self.STREAM_RENDER_INTERVAL_MS)
+        self._stream_timer.timeout.connect(self._flush_stream)
 
-        self._fit_timer.stop()
-        web_view = self._web_view
-        if web_view is None:
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setInterval(16)
+        self._reveal_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._reveal_timer.timeout.connect(self._advance_reveal)
+
+        self._curtain = _RevealCurtain(self)
+        self._curtain.set_color(QColor(colors("light")["canvas"]))
+
+        self.setFixedHeight(22)
+
+    def dispose(self) -> None:
+        """Retire timers and Chromium surfaces before deletion."""
+
+        if self._disposed:
             return
-        self._web_view = None
-        self._stack.removeWidget(web_view)
-        web_view.dispose()
-        self._text_formats.clear()
-        self._applied_reveal_characters = 0
+        self._disposed = True
+        self._stop_timers()
+        self._dispose_tiles()
+        self._curtain.hide()
 
     def clear_selection(self) -> None:
-        if self._uses_math and self._web_view is not None:
-            self._web_view.clear_selection()
+        if self._uses_math:
+            for tile in self._tiles:
+                tile.clear_selection()
         else:
             self._text_view.clear_selection()
 
@@ -881,187 +786,442 @@ class RichText(QWidget):
 
         return self._text_view.document()
 
+    def set_theme(self, dark: bool) -> None:
+        """Track the palette; re-rendering happens on the next set_html."""
+
+        theme = "dark" if dark else "light"
+        if theme == self._theme:
+            return
+        self._theme = theme
+        self._renderer.set_theme(dark)
+        self._curtain.set_color(QColor(colors(theme)["canvas"]))
+
+    @property
+    def uses_web_renderer(self) -> bool:
+        return self._uses_math
+
+    @property
+    def tile_count(self) -> int:
+        """How many GPU-safe surfaces currently paint this message."""
+
+        return len(self._tiles)
+
+    @property
+    def tile_height(self) -> int:
+        """Maximum height of one painted surface, in logical pixels."""
+
+        return self._tile_height()
+
+    @property
+    def document_height(self) -> int:
+        """Natural height of the whole answer, reached or not."""
+
+        return self._document_extent()
+
+    @property
+    def front_height(self) -> int:
+        """Document y of the reveal frontier."""
+
+        return max(0, self._front_height)
+
+    @property
+    def is_revealing(self) -> bool:
+        return self._reveal_active
+
+    @property
+    def frontier(self) -> float:
+        """Document y the reveal has uncovered so far."""
+
+        return float(self._frontier)
+
+    @property
+    def revealed_fraction(self) -> float:
+        """Fraction of the buffered answer that is already on screen."""
+
+        if not self._reveal_active:
+            return 1.0
+        extent = max(1, self._document_extent())
+        return max(0.0, min(1.0, self._frontier / extent))
+
     def set_html(
         self,
         body: str,
         reveal_characters: int | None = None,
         reveal_total_characters: int | None = None,
     ) -> None:
-        self._html = body
-        self._reveal_characters = (
-            None
-            if reveal_characters is None
-            else max(0, int(reveal_characters))
+        """Show a finished body (history, reasoning) without streaming.
+
+        ``reveal_characters`` / ``reveal_total_characters`` keep the legacy
+        API: when they are given the body fades in from its first line.
+        """
+
+        if self._disposed:
+            return
+        self._stop_timers()
+        self._streaming = False
+        self._finished = True
+        self._source = ""
+        self._renderer.reset()
+        self._renderer.set_theme(self._theme == "dark")
+        self._html = str(body or "")
+        style, inner = _split_rendered_html(self._html)
+        self._style_html = style or self._renderer.style_html()
+        self._stable_html = inner
+        self._tail_html = ""
+        self._uses_math = _needs_web_renderer(inner)
+        animate = (
+            reveal_characters is not None or reveal_total_characters is not None
         )
-        self._reveal_total_characters = (
-            None
-            if reveal_total_characters is None
-            else max(0, int(reveal_total_characters))
-        )
-        self._uses_math = "data-tex=" in body or "data-code-block=" in body
+        self._reveal_active = bool(animate)
+        self._frontier = 0.0 if animate else float("inf")
+        self._document_height = 0
+        self._changes_from = 0
         if self._uses_math:
-            self._ensure_web_view().set_content(
-                body,
-                self._reveal_characters,
-                self._reveal_total_characters,
-            )
-        else:
-            if self._web_view is not None:
-                self.dispose()
-            self._text_view.setHtml(body)
-            self._stack.setCurrentWidget(self._text_view)
-            self._prepare_text_reveal()
-            self._schedule_fit()
+            # A finished body is part of the conversation history, so it is
+            # fully on screen the moment its surface has painted.
+            self._reveal_active = False
+            self._rebuild_web()
+            return
+        self._dispose_tiles()
+        self._text_view.show()
+        self._text_view.setHtml(self._html)
+        self._curtain.hide()
+        self._set_content_height(22)
+        self._schedule_fit()
 
     def set_reveal_characters(self, characters: int | None) -> None:
-        self._reveal_characters = (
-            None if characters is None else max(0, int(characters))
-        )
-        if self._uses_math and self._web_view is not None:
-            self._web_view.set_reveal_characters(
-                self._reveal_characters,
-                self._reveal_total_characters,
-            )
-            return
-        self._apply_text_reveal()
+        """Legacy hook: finish the reveal or hide the curtain."""
 
-    def _prepare_text_reveal(self) -> None:
-        if self._uses_math:
+        if self._disposed:
             return
+        if characters is None:
+            self._finish_reveal()
+            return
+        self._reveal_active = True
+        self._frontier = min(self._frontier, float(max(0, int(characters))))
+        if not self._reveal_timer.isActive():
+            self._reveal_timer.start()
+
+    # ------------------------------------------------------------------
+    # buffered streaming
+    # ------------------------------------------------------------------
+    def begin_stream(self) -> None:
+        """Start an answer whose text arrives through :meth:`stream_text`."""
+
+        if self._disposed:
+            return
+        self._stop_timers()
+        self._renderer.set_theme(self._theme == "dark")
+        self._renderer.reset()
+        self._html = ""
+        self._source = ""
+        self._style_html = self._renderer.style_html()
+        self._stable_html = ""
+        self._tail_html = ""
+        self._streaming = True
+        self._finished = False
+        self._stream_dirty = False
+        self._reveal_active = True
+        self._frontier = 0.0
+        self._document_height = 0
+        self._changes_from = 0
+        self._dispose_tiles()
+        self._uses_math = False
+        self._text_view.show()
+        self._text_view.document().setHtml("")
+        self._curtain.setVisible(False)
+        self._set_content_height(22)
+        if not self._reveal_timer.isActive():
+            self._reveal_timer.start()
+
+    def stream_text(self, source: str) -> None:
+        """Buffer model output; rendering and revealing follow on their own."""
+
+        if self._disposed:
+            return
+        if not self._streaming:
+            self.begin_stream()
+        self._source = str(source or "")
+        self._stream_dirty = True
+        if not self._stream_timer.isActive():
+            self._stream_timer.start()
+
+    def complete_stream(self) -> None:
+        """Mark the buffer final and let the reveal drain what is left."""
+
+        if self._disposed:
+            return
+        self._finished = True
+        if self._stream_dirty or self._stream_timer.isActive():
+            self._stream_timer.stop()
+            self._flush_stream()
+        if not self._reveal_active:
+            self._finish_reveal()
+            return
+        self._advance_reveal()
+
+    # ------------------------------------------------------------------
+    # reveal
+    # ------------------------------------------------------------------
+    def _reveal_limit(self) -> float:
+        """Document y the frontier may reach, fade allowance included."""
+
+        return self._document_extent() + self.REVEAL_SETTLE_ALLOWANCE
+
+    def _advance_reveal(self) -> None:
+        """Move the frontier one display frame forward and resize the body."""
+
+        if self._disposed or not self._reveal_active:
+            self._reveal_timer.stop()
+            return
+        limit = self._reveal_limit()
+        backlog = limit - self._frontier
+        if backlog > 0:
+            step = min(
+                self.REVEAL_MAX_STEP_PX,
+                max(self.REVEAL_MIN_STEP_PX, backlog * self.REVEAL_CATCH_UP),
+            )
+            self._frontier = min(limit, self._frontier + step)
+            self._curtain.set_band(step * self.REVEAL_BAND_PER_PIXEL)
+        self._apply_reveal_geometry()
+        if self._finished and self._frontier >= limit:
+            self._finish_reveal()
+            return
+        self._reveal_timer.start()
+
+    def _apply_reveal_geometry(self) -> None:
+        """Expose the revealed slice and park the fade curtain on its edge."""
+
+        extent = self._document_extent()
+        visible = int(max(0.0, min(float(extent), self._frontier)))
+        self._set_content_height(max(22, visible))
+        if not self._reveal_active:
+            self._curtain.hide()
+            return
+        band = self._curtain.band
+        top = int(round(self._frontier)) - band
+        self._curtain.setGeometry(0, top, max(1, self.width()), band)
+        show = top < max(22, visible) - 4
+        self._curtain.setVisible(show)
+        if show:
+            self._curtain.raise_()
+
+    def _text_document_height(self) -> int:
         document = self._text_view.document()
-        self._text_formats.clear()
-        block = document.begin()
-        while block.isValid():
-            iterator = block.begin()
-            while not iterator.atEnd():
-                fragment = iterator.fragment()
-                if fragment.isValid():
-                    format_ = fragment.charFormat()
-                    start = fragment.position()
-                    self._text_formats.append(
-                        (start, start + len(fragment.text()), format_)
-                    )
-                iterator += 1
-            block = block.next()
-        self._applied_reveal_characters = 0
-        if self._reveal_characters is None:
-            self._applied_reveal_characters = max(
-                0,
-                document.characterCount() - 1,
-            )
-        else:
-            self._apply_text_reveal()
+        return max(0, int(document.size().height() + 3))
 
-    def _apply_text_reveal(self) -> None:
+    def _document_extent(self) -> int:
+        """Height of the whole answer, in document pixels."""
+
         if self._uses_math:
-            return
-        document = self._text_view.document()
-        document_length = max(0, document.characterCount() - 1)
-        if self._reveal_characters is None:
-            self._restore_text_formats(
-                document,
-                self._applied_reveal_characters,
-                document_length,
-            )
-            self._applied_reveal_characters = document_length
-            self._fit_text_height()
-            return
-        if self._reveal_total_characters:
-            visible = min(
-                document_length,
-                ceil(
-                    document_length
-                    * self._reveal_characters
-                    / self._reveal_total_characters
-                ),
-            )
-        else:
-            visible = min(document_length, self._reveal_characters)
+            return max(0, self._document_height)
+        return self._text_document_height()
 
-        if visible < self._applied_reveal_characters:
-            # A fresh document can arrive after a streaming renderer switch;
-            # recapture the original formats before revealing from the start.
-            self._text_view.setHtml(self._html)
-            self._prepare_text_reveal()
+    def _finish_reveal(self) -> None:
+        """Retire the curtain and expose the finished answer."""
+
+        if self._disposed:
             return
+        was_active = self._reveal_active
+        self._reveal_active = False
+        self._reveal_timer.stop()
+        self._curtain.hide()
+        if self._uses_math:
+            if self._renderer.source:
+                # Repaint every surface once from the finished source: the
+                # last stream batch can still have been in flight, and a
+                # transient split (an unterminated formula, a reference
+                # defined after its use) can only be resolved by a full pass.
+                self._style_html = self._renderer.style_html()
+                self._stable_html = render_body(self._renderer.source)
+                self._tail_html = ""
+                self._rebuild_web()
+        self._set_content_height(max(22, self._document_extent()))
+        if was_active:
+            self.revealFinished.emit()
 
-        transparent = QTextCharFormat()
-        transparent.setForeground(QColor(0, 0, 0, 0))
-        if visible == 0 and document_length:
-            cursor = self._text_cursor_for_range(
-                document,
-                0,
-                document_length,
-            )
-            cursor.mergeCharFormat(transparent)
-        elif self._applied_reveal_characters == 0 and document_length:
-            cursor = self._text_cursor_for_range(
-                document,
-                visible,
-                document_length,
-            )
-            cursor.mergeCharFormat(transparent)
+    def _update_content_geometry(self) -> None:
+        """Keep the painted surfaces and the curtain aligned with this body."""
 
-        self._restore_text_formats(
-            document,
-            self._applied_reveal_characters,
-            visible,
+        width = max(1, self.width())
+        self._text_view.setGeometry(0, 0, width, max(1, self.height()))
+        tile_height = self._tile_height()
+        for index, tile in enumerate(self._tiles):
+            tile.setGeometry(0, index * tile_height, width, tile.height())
+        if self._reveal_active:
+            self._apply_reveal_geometry()
+
+    def _stop_timers(self) -> None:
+        self._stream_timer.stop()
+        self._reveal_timer.stop()
+        self._fit_timer.stop()
+
+    def _dispose_tiles(self) -> None:
+        tiles, self._tiles = self._tiles, []
+        for tile in tiles:
+            tile.hide()
+            tile.dispose()
+            tile.deleteLater()
+
+    def _tile_height(self) -> int:
+        return _surface_height_limit(self)
+
+    def _flush_stream(self) -> None:
+        """Render buffered output, appending only what has not been shown."""
+
+        self._stream_dirty = False
+        if self._disposed or not self._streaming:
+            return
+        delta, code_delta, tail = self._renderer.update(self._source)
+        self._style_html = self._renderer.style_html()
+        # The live code line travels as ``codeTail`` so a surface can replace
+        # it instead of printing it twice.
+        self._stable_html = self._renderer.composed_stable_html(
+            include_code_tail=False
         )
-        self._applied_reveal_characters = visible
-        self._fit_text_height()
+        self._tail_html = tail
+        wants_web = _needs_web_renderer(self._stable_html) or _needs_web_renderer(
+            self._tail_html
+        )
+        if wants_web and not self._uses_math:
+            self._rebuild_web()
+            return
+        if wants_web:
+            self._push_web(
+                delta,
+                self._tail_html,
+                code_delta=code_delta,
+                code_tail=self._renderer.code_tail_text,
+            )
+            return
+        self._render_text_stream()
 
-    def _restore_text_formats(
+    def _render_text_stream(self) -> None:
+        """Repaint the plain-text body from the incremental renderer."""
+
+        self._dispose_tiles()
+        self._uses_math = False
+        self._text_view.show()
+        self._text_view.setHtml(self._style_html + self._renderer.body_html())
+        self._schedule_fit()
+        if self._reveal_active:
+            self._apply_reveal_geometry()
+
+    def _rebuild_web(self) -> None:
+        """Paint the answer with Chromium tiles using the current HTML."""
+
+        self._uses_math = True
+        self._text_view.hide()
+        self._document_height = 0
+        self._changes_from = 0
+        self._repaint_tiles = True
+        self._sync_tiles()
+        if self._reveal_active:
+            self._apply_reveal_geometry()
+
+    def _sync_tiles(self) -> None:
+        """Grow or shrink the windowed tile stack over the document."""
+
+        tile_height = self._tile_height()
+        document = max(0, self._document_height)
+        needed = (
+            max(1, int(ceil(document / tile_height)))
+            if document > 0
+            else (1 if (self._stable_html or self._tail_html) else 0)
+        )
+        while len(self._tiles) > needed:
+            tile = self._tiles.pop()
+            tile.hide()
+            tile.dispose()
+            tile.deleteLater()
+        width = max(1, self.width())
+        for index, tile in enumerate(self._tiles):
+            top = index * tile_height
+            height = max(1, min(tile_height, document - top))
+            tile.setGeometry(0, top, width, height)
+            tile.set_offset(top)
+        while len(self._tiles) < needed:
+            index = len(self._tiles)
+            top = index * tile_height
+            height = max(
+                1,
+                min(tile_height, document - top) if document else tile_height,
+            )
+            tile = _MathWebView(self)
+            tile.layoutReported.connect(
+                lambda height, changed, view=tile: self._on_tile_layout(
+                    view, height, changed
+                )
+            )
+            tile.setGeometry(0, top, width, height)
+            self._paint_tile(tile, top)
+            tile.show()
+            tile.raise_()
+            self._tiles.append(tile)
+        if self._repaint_tiles:
+            # A rebuild repaints the surfaces that are already alive instead
+            # of replacing them, which keeps Chromium pages from churning.
+            for index, tile in enumerate(self._tiles[:needed]):
+                self._paint_tile(tile, index * tile_height)
+        self._repaint_tiles = False
+        if not self._tiles:
+            self._set_content_height(22)
+        elif not self._reveal_active:
+            self._set_content_height(max(22, self._document_height))
+        self._curtain.raise_()
+
+    def _paint_tile(self, tile: _MathWebView, top: int) -> None:
+        tile.set_document(
+            self._style_html,
+            self._stable_html,
+            self._tail_html,
+            code_tail=self._renderer.code_tail_text,
+            offset=top,
+        )
+
+    def _push_web(
         self,
-        document: QTextDocument,
-        start: int,
-        end: int,
+        delta: str,
+        tail: str,
+        *,
+        code_delta: str = "",
+        code_tail: str = "",
     ) -> None:
-        for fragment_start, fragment_end, format_ in self._text_formats:
-            left = max(start, fragment_start)
-            right = min(end, fragment_end)
-            if left >= right:
+        """Send the newest HTML fragments to every tile that can show them."""
+
+        if not self._tiles:
+            self._sync_tiles()
+            return
+        tile_height = self._tile_height()
+        dirty = max(0, self._changes_from)
+        for index, tile in enumerate(self._tiles):
+            if (index + 1) * tile_height <= dirty:
                 continue
-            cursor = self._text_cursor_for_range(
-                document,
-                left,
-                right,
+            tile.push_stream(
+                delta,
+                tail,
+                code_delta=code_delta,
+                code_tail=code_tail,
+                composed_stable=self._stable_html,
             )
-            cursor.setCharFormat(format_)
 
-    @staticmethod
-    def _text_cursor_for_range(
-        document: QTextDocument,
-        start: int,
-        end: int,
-    ) -> QTextCursor:
-        cursor = QTextCursor(document)
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-        return cursor
-
-    def _ensure_web_view(self) -> _MathWebView:
-        if self._web_view is None:
-            self._web_view = _MathWebView()
-            self._web_view.contentRendered.connect(self._show_rendered_math)
-            self._web_view.contentHeightChanged.connect(self._fit_web_height)
-            self._stack.addWidget(self._web_view)
-        return self._web_view
-
-    def _show_rendered_math(self) -> None:
-        if not self._uses_math or self._web_view is None:
+    def _on_tile_layout(
+        self,
+        tile: _MathWebView,
+        document_height: int,
+        changed_top: int,
+    ) -> None:
+        if self._disposed or tile is None or tile not in self._tiles:
             return
-        self._stack.setCurrentWidget(self._web_view)
-        self._web_view.set_reveal_characters(
-            self._reveal_characters,
-            self._reveal_total_characters,
-        )
-        self._fit_web_height(self._web_view.height())
-
-    @Slot(int)
-    def _fit_web_height(self, height: int) -> None:
-        if not self._uses_math or self._web_view is None:
-            return
-        self._set_content_height(height)
+        if changed_top > self._changes_from:
+            self._changes_from = changed_top
+        if document_height > self._document_height:
+            # Tiles that skipped an update report an older, shorter document;
+            # the answer only ever grows, so the tallest report wins.
+            self._document_height = document_height
+            self._sync_tiles()
+            if not self._reveal_active:
+                self._set_content_height(max(22, self._document_height))
 
     def _schedule_fit(self) -> None:
         if not self._uses_math and not self._fit_timer.isActive():
@@ -1074,19 +1234,8 @@ class RichText(QWidget):
         document = self._text_view.document()
         if abs(document.textWidth() - width) > 0.5:
             document.setTextWidth(width)
-        if self._reveal_characters is None:
-            height = max(22, int(document.size().height() + 3))
-        else:
-            # Transparent future characters still occupy the document. Only
-            # expose the line containing the last revealed character to the
-            # outer chat scroller so it follows the typing cursor.
-            position = max(0, self._applied_reveal_characters - 1)
-            block = document.findBlock(position)
-            layout = block.layout()
-            line = layout.lineForTextPosition(position - block.position())
-            block_top = document.documentLayout().blockBoundingRect(block).top()
-            height = max(22, int(block_top + line.y() + line.height() + 3))
-        self._set_content_height(height)
+        if not self._reveal_active:
+            self._set_content_height(max(22, self._text_document_height()))
 
     def _set_content_height(self, height: int) -> None:
         if abs(self.height() - height) > 1:
@@ -1095,6 +1244,7 @@ class RichText(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._update_content_geometry()
         self._schedule_fit()
 
 
@@ -1824,8 +1974,6 @@ class UserBubble(MessageBubble):
 class AssistantBubble(MessageBubble):
     role = "assistant"
     layoutHeightChanged = Signal()
-    CONTENT_TYPING_INTERVAL_MS = 28
-    CONTENT_TYPING_STEPS = 36
 
     def __init__(
         self,
@@ -1842,8 +1990,6 @@ class AssistantBubble(MessageBubble):
         self._reasoning = reasoning
         self._streaming = streaming
         self._content_dirty = bool(content)
-        self._typing_enabled = streaming
-        self._typing_visible_characters = 0
         self._operation_phase = ReasoningPanel.THINKING_PHASE
 
         outer = QHBoxLayout(self)
@@ -1894,7 +2040,9 @@ class AssistantBubble(MessageBubble):
         column.addWidget(self.status_row)
 
         self.content_view = RichText()
+        self.content_view.set_theme(theme == "dark")
         self.content_view.heightChanged.connect(self.layoutHeightChanged)
+        self.content_view.revealFinished.connect(self._on_reveal_finished)
         self.content_view.setVisible(bool(content))
         column.addWidget(self.content_view)
 
@@ -1915,22 +2063,15 @@ class AssistantBubble(MessageBubble):
         self.actions.setVisible(bool(content) and not streaming)
         column.addWidget(self.actions)
 
-        self._content_timer = QTimer(self)
-        self._content_timer.setSingleShot(True)
-        self._content_timer.setInterval(60)
-        self._content_timer.timeout.connect(self._render_content)
-        self._typing_timer = QTimer(self)
-        self._typing_timer.setInterval(self.CONTENT_TYPING_INTERVAL_MS)
-        self._typing_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._typing_timer.timeout.connect(self._advance_content_typing)
         self._reasoning_timer = QTimer(self)
         self._reasoning_timer.setSingleShot(True)
         self._reasoning_timer.setInterval(80)
         self._reasoning_timer.timeout.connect(self._render_reasoning)
 
         if content:
-            if self._typing_enabled:
-                self._start_content_typing()
+            if streaming:
+                self.content_view.begin_stream()
+                self.content_view.stream_text(content)
             else:
                 self._render_content()
         if streaming and not thinking:
@@ -1946,8 +2087,6 @@ class AssistantBubble(MessageBubble):
         if self._disposed:
             return
         self._disposed = True
-        self._content_timer.stop()
-        self._typing_timer.stop()
         self._reasoning_timer.stop()
         self.status_indicator.stop()
         if self.reasoning_panel is not None:
@@ -2032,132 +2171,54 @@ class AssistantBubble(MessageBubble):
             self.layoutHeightChanged.emit()
 
     def set_content(self, content: str) -> None:
+        """Buffer model output; the reveal reads it back out on its own."""
+
         if self._disposed:
             return
         self._plain = content
-        if self._streaming:
-            self._typing_enabled = True
         self._content_dirty = True
         self.begin_answer()
-        if not self._content_timer.isActive():
-            self._content_timer.start()
+        if not self._streaming:
+            self._render_content()
+            return
+        self.content_view.stream_text(content)
 
     def _render_content(self) -> None:
+        """Paint a finished (or history) body in one pass."""
+
         if self._disposed or not self._content_dirty:
             return
         self._content_dirty = False
-        if (
-            self._typing_enabled
-            and self._plain
-            and self._typing_visible_characters == 0
-        ):
-            self._typing_visible_characters = 1
-        self._typing_visible_characters = min(
-            self._typing_visible_characters,
-            len(self._plain),
-        )
-        reveal_characters = (
-            self._typing_visible_characters
-            if self._typing_enabled
-            else None
-        )
         self.content_view.set_html(
             to_html(self._plain, dark=self._theme == "dark"),
-            reveal_characters=reveal_characters,
-            reveal_total_characters=(
-                len(self._plain) if self._typing_enabled else None
-            ),
         )
-        if (
-            self._typing_enabled
-            and self._typing_visible_characters < len(self._plain)
-            and not self._typing_timer.isActive()
-        ):
-            self._typing_timer.start()
+        self.content_view.setVisible(bool(self._plain))
+        self.actions.setVisible(bool(self._plain))
 
-    def _start_content_typing(self) -> None:
-        """Reveal the answer source in small batches from its first character."""
+    @Slot()
+    def _on_reveal_finished(self) -> None:
+        """The newest text has fully emerged; expose the message actions."""
 
-        if self._disposed or not self._typing_enabled or not self._plain:
-            return
-        if self._typing_visible_characters == 0:
-            self._typing_visible_characters = 1
-        self._content_dirty = True
-        self._render_content()
-        if self._typing_visible_characters < len(self._plain):
-            self._typing_timer.start()
-        elif not self._streaming:
-            self._finish_content_typing()
-
-    def _advance_content_typing(self) -> None:
-        if self._disposed or not self._typing_enabled:
-            self._typing_timer.stop()
-            return
-
-        target_length = len(self._plain)
-        if target_length <= self._typing_visible_characters:
-            self._typing_timer.stop()
-            if not self._streaming:
-                self._finish_content_typing()
-            return
-
-        remaining = target_length - self._typing_visible_characters
-        step = max(1, ceil(remaining / self.CONTENT_TYPING_STEPS))
-        self._typing_visible_characters = min(
-            target_length,
-            self._typing_visible_characters + step,
-        )
-        if self._content_dirty:
-            # A new stream chunk may be waiting for the debounce timer. Make
-            # sure the reveal is applied to the newest DOM rather than to the
-            # previous chunk's document.
-            self._render_content()
-        else:
-            self.content_view.set_reveal_characters(
-                self._typing_visible_characters
-            )
-
-        if (
-            self._typing_visible_characters >= target_length
-            and not self._streaming
-        ):
-            self._finish_content_typing()
-
-    def _finish_content_typing(self) -> None:
         if self._disposed:
             return
-        self._typing_timer.stop()
-        self._typing_enabled = False
-        self._typing_visible_characters = len(self._plain)
-        self._content_dirty = False
-        self.content_view.set_reveal_characters(None)
         self.content_view.setVisible(bool(self._plain))
-        self.actions.setVisible(bool(self._plain) and not self._streaming)
+        self.actions.setVisible(bool(self._plain))
         self.layoutHeightChanged.emit()
 
     def finish(self, stopped: bool = False) -> None:
         if self._disposed:
             return
         self._streaming = False
-        self._content_timer.stop()
         self._reasoning_timer.stop()
         self._render_reasoning()
-        if self._typing_enabled and self._plain:
-            if self._typing_visible_characters < len(self._plain):
-                self._content_dirty = True
-                self._render_content()
-                self._typing_timer.start()
-            else:
-                self._finish_content_typing()
-        else:
-            self._render_content()
+        self.content_view.complete_stream()
         if self.reasoning_panel:
             self.reasoning_panel.set_running(False)
         self.status_indicator.stop()
         self.status_row.hide()
         self.content_view.setVisible(bool(self._plain))
         self.completion_label.setText("已停止" if stopped else "")
-        if not self._typing_timer.isActive():
+        if not self.content_view.is_revealing:
             self.actions.setVisible(bool(self._plain))
 
     def fail(self, message: str) -> None:
@@ -2183,12 +2244,23 @@ class AssistantBubble(MessageBubble):
             )
         )
         self.status_indicator.set_theme(theme)
+        self.content_view.set_theme(theme == "dark")
         self.content_view.setStyleSheet(
             f"background:transparent;color:{palette['fg']};border:none;"
         )
-        if self._plain and (theme_changed or self._content_dirty):
+        if self._plain and theme_changed:
             self._content_dirty = True
-            self._render_content()
+            if self._streaming:
+                revealed = int(
+                    self.content_view.revealed_fraction * len(self._plain)
+                )
+                self.content_view.set_html(
+                    to_html(self._plain, dark=theme == "dark"),
+                    reveal_characters=revealed,
+                    reveal_total_characters=len(self._plain),
+                )
+            else:
+                self._render_content()
         if self.reasoning_panel:
             self.reasoning_panel.apply_theme(theme)
         apply_icon(self.copy_button, "copy", palette["fg_sub"], 17)
@@ -2238,6 +2310,7 @@ class ChatView(QScrollArea):
         self._catch_up_active = False
         self._catch_up_start = 0
         self._catch_up_duration = 0
+        self._follow_maximum = 0
         self._catch_up_clock = QElapsedTimer()
         self._scroll_timer = QTimer(self)
         self._scroll_timer.setInterval(16)
@@ -2272,6 +2345,7 @@ class ChatView(QScrollArea):
         self._stop_selection_drag()
         self._scroll_timer.stop()
         self._catch_up_active = False
+        self._follow_maximum = 0
         for bubble in self._bubbles:
             self.messages.removeWidget(bubble)
             bubble.dispose()
@@ -2450,6 +2524,7 @@ class ChatView(QScrollArea):
             return
         self._catch_up_active = True
         self._catch_up_start = bar.value()
+        self._follow_maximum = bar.maximum()
         self._catch_up_duration = min(650, max(260, round(260 + distance ** 0.5 * 4)))
         self._catch_up_clock.start()
         self._scroll_timer.start()
@@ -2553,6 +2628,7 @@ class ChatView(QScrollArea):
     def scroll_to_bottom(self, force: bool = False) -> None:
         if force:
             self._set_follow_output(True)
+            self._follow_maximum = self.verticalScrollBar().maximum()
         if not self._follow_output:
             return
         if not self._scroll_timer.isActive():
@@ -2565,6 +2641,8 @@ class ChatView(QScrollArea):
         bar = self.verticalScrollBar()
         maximum = bar.maximum()
         current = bar.value()
+        growth = max(0, maximum - self._follow_maximum)
+        self._follow_maximum = maximum
         if self._catch_up_active:
             progress = min(1.0, self._catch_up_clock.elapsed() / self._catch_up_duration)
             eased = progress * progress * (3.0 - 2.0 * progress)
@@ -2573,11 +2651,19 @@ class ChatView(QScrollArea):
                 self._catch_up_active = False
         else:
             distance = maximum - current
-            target = current + min(140, max(1, ceil(distance * 0.42)))
+            # While the answer keeps growing the lane has to move at least as
+            # fast as the content does, so the newest text stays pinned to the
+            # bottom of the viewport instead of sliding out of sight.
+            step = max(growth, min(140, max(1, ceil(distance * 0.42))))
+            target = current + step
         self._programmatic_scroll = True
         try:
             bar.setValue(min(maximum, target))
         finally:
             self._programmatic_scroll = False
-        if not self._catch_up_active and bar.value() >= bar.maximum():
+        if (
+            not self._catch_up_active
+            and growth <= 0
+            and bar.value() >= bar.maximum()
+        ):
             self._scroll_timer.stop()
