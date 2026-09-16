@@ -903,10 +903,7 @@ def stream_search_function(
         if stop.is_set():
             return
         if not tool_calls:
-            # Content from a round that also contains tool calls is usually
-            # only a short preamble (for example, "我先搜索一下"). Do not
-            # expose it as the final answer before we know this is the final
-            # model round. Reasoning can still stream while the model decides.
+            # Do not expose a tool-call preamble as the final answer before the final model round.
             for content in round_content:
                 yield ("content", content)
             return

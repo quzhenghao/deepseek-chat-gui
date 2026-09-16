@@ -108,6 +108,9 @@ class ChatTextEdit(QTextEdit):
     def is_expanded(self) -> bool:
         return self._expanded
 
+    def is_height_animating(self) -> bool:
+        return self._height_animator.is_running()
+
     def set_expanded(self, expanded: bool) -> None:
         if self._expanded == expanded:
             return
@@ -442,8 +445,7 @@ class InputPanel(QWidget):
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         palette = colors(theme)
-        # An even icon canvas centers exactly inside the 34px circular button;
-        # the previous 19px canvas could land on a half-pixel offset.
+        # Use an even icon canvas to center it inside the 34px circular button.
         apply_icon(self.attach_button, "plus", palette["fg_sub"], 20)
         self._refresh_expand_button()
         self.effort_combo.set_theme(theme)
@@ -484,6 +486,8 @@ class ChatWorkspace(QWidget):
         self._panel: InputPanel | None = None
         self._welcome: QWidget | None = None
         self._chat_view: ChatView | None = None
+        self._welcome_panel_bottom: int | None = None
+        self._welcome_transition_active = False
         self.follow_button = QToolButton(self)
         self.follow_button.setObjectName("followLatestBtn")
         self.follow_button.setFixedSize(36, 36)
@@ -506,6 +510,7 @@ class ChatWorkspace(QWidget):
         panel.setParent(self)
         stack.currentChanged.connect(lambda _index: self._sync_layout())
         panel.editor.heightChanged.connect(self._sync_layout)
+        panel.editor.expandedChanged.connect(self._on_editor_expanded_changed)
         panel.image_strip.imagesChanged.connect(self._sync_layout)
         chat_view.followChanged.connect(lambda _enabled: self._sync_follow_button())
         self.follow_button.clicked.connect(chat_view.resume_follow)
@@ -514,6 +519,10 @@ class ChatWorkspace(QWidget):
 
     def set_page(self, widget: QWidget) -> None:
         if self._stack is not None:
+            current = self._stack.currentWidget()
+            if widget is not self._welcome or current is not self._welcome:
+                self._welcome_panel_bottom = None
+                self._welcome_transition_active = False
             self._stack.setCurrentWidget(widget)
         self._sync_layout()
 
@@ -552,7 +561,22 @@ class ChatWorkspace(QWidget):
 
         is_welcome = self._stack.currentWidget() is self._welcome
         if is_welcome:
-            panel_y = max(0, min(int(height * 0.59), height - panel_height))
+            expanded = self._panel.editor.is_expanded()
+            if expanded and self._welcome_panel_bottom is None:
+                self._welcome_panel_bottom = min(
+                    height,
+                    int(height * 0.59) + panel_height,
+                )
+            if self._welcome_panel_bottom is not None:
+                panel_y = max(
+                    0,
+                    min(
+                        height - panel_height,
+                        self._welcome_panel_bottom - panel_height,
+                    ),
+                )
+            else:
+                panel_y = max(0, min(int(height * 0.59), height - panel_height))
             welcome_layout = self._welcome.layout()
             if welcome_layout is not None:
                 left, top, right, bottom = welcome_layout.getContentsMargins()
@@ -564,6 +588,12 @@ class ChatWorkspace(QWidget):
             if self._chat_view is not None:
                 self._chat_view.set_composer_clearance(0)
                 self._chat_view.set_bottom_inset(18)
+            if (
+                self._welcome_transition_active
+                and not expanded
+                and not self._panel.editor.is_height_animating()
+            ):
+                self._welcome_transition_active = False
         else:
             panel_y = max(0, height - panel_height)
             if self._chat_view is not None:
@@ -575,6 +605,34 @@ class ChatWorkspace(QWidget):
         if self._chat_view is not None and not is_welcome:
             self._place_follow_button()
         self._sync_follow_button()
+
+    def _on_editor_expanded_changed(self, expanded: bool) -> None:
+        if self._stack is None or self._panel is None:
+            return
+        if self._stack.currentWidget() is not self._welcome:
+            return
+        self._begin_welcome_transition()
+        self._sync_layout()
+
+    def _begin_welcome_transition(self) -> None:
+        if self._stack is None or self._panel is None:
+            return
+        if self._stack.currentWidget() is not self._welcome:
+            return
+        if not self._welcome_transition_active:
+            geometry = self._panel.geometry()
+            bottom = geometry.y() + geometry.height()
+            if bottom <= 0:
+                panel_layout = self._panel.layout()
+                if panel_layout is not None:
+                    panel_layout.activate()
+                panel_height = max(132, self._panel.sizeHint().height())
+                bottom = min(
+                    self.height(),
+                    int(self.height() * 0.59) + panel_height,
+                )
+            self._welcome_panel_bottom = max(0, bottom)
+        self._welcome_transition_active = True
 
     def _place_follow_button(self) -> None:
         """Park the control beside the submit button, on its exact baseline."""
@@ -646,6 +704,15 @@ class MainWindow(QMainWindow):
         self._sidebar_animator = FrameAnimator(300, self)
         self._sidebar_animator.valueChanged.connect(self._apply_sidebar_width)
         self._sidebar_animator.finished.connect(self._finish_sidebar_transition)
+        self._welcome_compact_progress = 0.0
+        self._welcome_compact_target = False
+        self._welcome_compact_animator = FrameAnimator(280, self)
+        self._welcome_compact_animator.valueChanged.connect(
+            self._apply_welcome_compact
+        )
+        self._welcome_compact_animator.finished.connect(
+            self._finish_welcome_compact
+        )
         self._hover_tips = HoverTipManager(app, self._theme, self)
         draft_template = str(Path(QDir.tempPath()) / "deepseek-chat-draft-XXXXXX")
         self._draft_dir = QTemporaryDir(draft_template)
@@ -761,6 +828,9 @@ class MainWindow(QMainWindow):
             self.welcome,
             self.chat_view,
         )
+        self.chat_input.heightChanged.connect(
+            self._sync_welcome_compact_with_input
+        )
         right_layout.addWidget(self.chat_workspace, 1)
 
         self.splitter.addWidget(right)
@@ -861,6 +931,10 @@ class MainWindow(QMainWindow):
 
         suggestions = QWidget()
         self.welcome_suggestions = suggestions
+        suggestions.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
         suggestions.setMaximumWidth(620)
         grid = QGridLayout(suggestions)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -885,19 +959,75 @@ class MainWindow(QMainWindow):
         center.addStretch()
         layout.addLayout(center)
         layout.addStretch(5)
+        suggestions.layout().activate()
+        self._welcome_suggestions_height = max(1, suggestions.sizeHint().height())
         return page
 
-    def _set_welcome_compact(self, expanded: bool) -> None:
-        self.welcome_suggestions.setVisible(not expanded)
+    def _apply_welcome_compact(self, progress: float) -> None:
+        progress = max(0.0, min(1.0, float(progress)))
+        self._welcome_compact_progress = progress
+        remaining = 1.0 - progress
+        self.welcome_suggestions.setMinimumHeight(0)
+        self.welcome_suggestions.setMaximumHeight(
+            max(0, round(self._welcome_suggestions_height * remaining))
+        )
+        self.welcome_suggestions.setVisible(
+            not (self._welcome_compact_target and progress >= 1.0)
+        )
         self.welcome_suggestion_gap.changeSize(
             0,
-            0 if expanded else 26,
+            max(0, round(26 * remaining)),
             QSizePolicy.Policy.Minimum,
             QSizePolicy.Policy.Fixed,
         )
-        self.welcome.layout().invalidate()
+        layout = self.welcome.layout()
+        layout.invalidate()
+        layout.activate()
+        self.welcome.updateGeometry()
+        self.chat_workspace._sync_layout()
+
+    def _finish_welcome_compact(self) -> None:
+        self._apply_welcome_compact(
+            1.0 if self._welcome_compact_target else 0.0
+        )
+
+    def _sync_welcome_compact_with_input(self) -> None:
+        if not self._welcome_compact_animator.is_running():
+            return
+        target_height = (
+            ChatTextEdit.EXPANDED_HEIGHT
+            if self._welcome_compact_target
+            else ChatTextEdit.COLLAPSED_HEIGHT
+        )
+        if self.chat_input.height() != target_height:
+            return
+        self._welcome_compact_animator.stop()
+        self._apply_welcome_compact(
+            1.0 if self._welcome_compact_target else 0.0
+        )
+
+    def _set_welcome_compact(self, expanded: bool) -> None:
+        self._welcome_compact_target = bool(expanded)
+        target = 1.0 if self._welcome_compact_target else 0.0
+        self._welcome_compact_animator.stop()
+        if self.stack.currentWidget() is not self.welcome:
+            self._apply_welcome_compact(target)
+            return
+        self.chat_workspace._begin_welcome_transition()
+        start = self._welcome_compact_progress
+        if target < start:
+            self.welcome_suggestions.setVisible(True)
+        if abs(start - target) < 0.001:
+            self._apply_welcome_compact(target)
+            return
+        self._welcome_compact_animator.start(start, target)
 
     def show_welcome(self) -> None:
+        self._welcome_compact_animator.stop()
+        self._welcome_compact_target = self.chat_input.is_expanded()
+        self._apply_welcome_compact(
+            1.0 if self._welcome_compact_target else 0.0
+        )
         self.chat_workspace.set_page(self.welcome)
         self.sidebar.set_current(None)
         self.chat_input.setFocus()
@@ -991,8 +1121,7 @@ class MainWindow(QMainWindow):
         if collapsed:
             self.sidebar.setMinimumWidth(RAIL_SIDEBAR_WIDTH)
         else:
-            # Reveal the full page while it is still clipped by the narrow
-            # sidebar, instead of swapping pages halfway through the motion.
+            # Reveal the full page before the narrow-sidebar animation swaps it.
             self.sidebar.set_collapsed(False)
         self._sidebar_animator.stop()
         start = self.sidebar.width() or SIDEBAR_DEFAULT_WIDTH
@@ -1666,6 +1795,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._warm_start_armed = False
         self._warm_start_pending = False
+        self._welcome_compact_animator.stop()
         if self._settings_page is not None:
             self._settings_page.cancel_pending_request()
         if self._notice_dialog is not None and isValid(self._notice_dialog):

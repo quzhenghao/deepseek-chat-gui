@@ -141,8 +141,7 @@ class _MathWebView(QWebEngineView):
         self._offset = 0
         self._stream_started = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        # The owning RichText positions tiles explicitly; it must stay free to
-        # resize them, so no fixed height is set here.
+        # RichText positions tiles explicitly, so this view must remain resizable.
         self.setMinimumHeight(1)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setCursor(Qt.CursorShape.IBeamCursor)
@@ -354,8 +353,7 @@ class _MathWebView(QWebEngineView):
         if self._disposed:
             return
         if height <= 1 and self._document_height <= 1:
-            # A page reports its still-unset body before the document call
-            # lands; that empty state must never reach the lane.
+            # Ignore an initial empty body report until the document call lands.
             return
         self._document_height = max(1, int(height))
         self._changed_top = max(0, int(changed_top))
@@ -690,21 +688,15 @@ class RichText(QWidget):
     heightChanged = Signal()
     revealFinished = Signal()
 
-    # The reveal frontier walks the answer at display refresh rate.  It is
-    # animated by the host - growing the message viewport and fading its edge
-    # with a native curtain - so no Chromium surface has to change per frame
-    # and the newest text still emerges as a large, soft, darkening area.
+    # The host animates the reveal frontier and curtain without repainting Chromium each frame.
     REVEAL_CATCH_UP = 0.16
     REVEAL_MIN_STEP_PX = 2.0
-    # Fast enough to feel immediate, slow enough that the lane can keep the
-    # newest text pinned to the bottom of the viewport while following.
+    # This cap keeps the reveal responsive while following the newest text.
     REVEAL_MAX_STEP_PX = 130.0
-    # The frontier may glide this far past the rendered text, which keeps it
-    # moving smoothly even though the DOM itself is updated in batches.
+    # This allowance keeps motion smooth while the DOM updates in batches.
     REVEAL_SETTLE_ALLOWANCE = 700.0
     REVEAL_BAND_PER_PIXEL = 2.5
-    # The DOM is kept barely ahead of the frontier, so the reveal can advance
-    # on every display frame instead of jumping when a batch lands.
+    # Keep the DOM slightly ahead of the frontier so each display frame advances smoothly.
     STREAM_RENDER_INTERVAL_MS = 16
 
     def __init__(self, parent=None) -> None:
@@ -822,7 +814,7 @@ class RichText(QWidget):
     def front_height(self) -> int:
         """Document y of the reveal frontier."""
 
-        return max(0, self._front_height)
+        return max(0, round(self._frontier))
 
     @property
     def is_revealing(self) -> bool:
@@ -877,8 +869,7 @@ class RichText(QWidget):
         self._document_height = 0
         self._changes_from = 0
         if self._uses_math:
-            # A finished body is part of the conversation history, so it is
-            # fully on screen the moment its surface has painted.
+            # History bodies are fully visible once their WebEngine surface paints.
             self._reveal_active = False
             self._rebuild_web()
             return
@@ -902,9 +893,7 @@ class RichText(QWidget):
         if not self._reveal_timer.isActive():
             self._reveal_timer.start()
 
-    # ------------------------------------------------------------------
-    # buffered streaming
-    # ------------------------------------------------------------------
+    # Buffered streaming.
     def begin_stream(self) -> None:
         """Start an answer whose text arrives through :meth:`stream_text`."""
 
@@ -960,9 +949,7 @@ class RichText(QWidget):
             return
         self._advance_reveal()
 
-    # ------------------------------------------------------------------
-    # reveal
-    # ------------------------------------------------------------------
+    # Reveal animation.
     def _reveal_limit(self) -> float:
         """Document y the frontier may reach, fade allowance included."""
 
@@ -985,6 +972,12 @@ class RichText(QWidget):
             self._curtain.set_band(step * self.REVEAL_BAND_PER_PIXEL)
         self._apply_reveal_geometry()
         if self._finished and self._frontier >= limit:
+            if self._uses_math and self._document_height <= 1 and (
+                self._stable_html or self._tail_html
+            ):
+                # Wait for a real DOM measurement so a zero-height page cannot collapse the lane.
+                self._reveal_timer.start()
+                return
             self._finish_reveal()
             return
         self._reveal_timer.start()
@@ -1028,14 +1021,12 @@ class RichText(QWidget):
         self._curtain.hide()
         if self._uses_math:
             if self._renderer.source:
-                # Repaint every surface once from the finished source: the
-                # last stream batch can still have been in flight, and a
-                # transient split (an unterminated formula, a reference
-                # defined after its use) can only be resolved by a full pass.
+                # Repaint each surface from the finished source to resolve incomplete batches and formulas.
                 self._style_html = self._renderer.style_html()
                 self._stable_html = render_body(self._renderer.source)
                 self._tail_html = ""
-                self._rebuild_web()
+                # Preserve the measured height while Chromium paints the final pass.
+                self._rebuild_web(preserve_height=True)
         self._set_content_height(max(22, self._document_extent()))
         if was_active:
             self.revealFinished.emit()
@@ -1074,8 +1065,7 @@ class RichText(QWidget):
             return
         delta, code_delta, tail = self._renderer.update(self._source)
         self._style_html = self._renderer.style_html()
-        # The live code line travels as ``codeTail`` so a surface can replace
-        # it instead of printing it twice.
+        # Send the live code line as ``codeTail`` so each surface replaces it instead of duplicating it.
         self._stable_html = self._renderer.composed_stable_html(
             include_code_tail=False
         )
@@ -1107,12 +1097,13 @@ class RichText(QWidget):
         if self._reveal_active:
             self._apply_reveal_geometry()
 
-    def _rebuild_web(self) -> None:
+    def _rebuild_web(self, *, preserve_height: bool = False) -> None:
         """Paint the answer with Chromium tiles using the current HTML."""
 
         self._uses_math = True
         self._text_view.hide()
-        self._document_height = 0
+        if not preserve_height:
+            self._document_height = 0
         self._changes_from = 0
         self._repaint_tiles = True
         self._sync_tiles()
@@ -1159,8 +1150,7 @@ class RichText(QWidget):
             tile.raise_()
             self._tiles.append(tile)
         if self._repaint_tiles:
-            # A rebuild repaints the surfaces that are already alive instead
-            # of replacing them, which keeps Chromium pages from churning.
+            # Repaint existing surfaces during rebuilds to avoid Chromium page churn.
             for index, tile in enumerate(self._tiles[:needed]):
                 self._paint_tile(tile, index * tile_height)
         self._repaint_tiles = False
@@ -1216,8 +1206,7 @@ class RichText(QWidget):
         if changed_top > self._changes_from:
             self._changes_from = changed_top
         if document_height > self._document_height:
-            # Tiles that skipped an update report an older, shorter document;
-            # the answer only ever grows, so the tallest report wins.
+            # Keep the tallest layout report because the answer only grows.
             self._document_height = document_height
             self._sync_tiles()
             if not self._reveal_active:
@@ -1379,8 +1368,7 @@ def _sentence_spans(
                 next_index += 1
             next_character = source[next_index] if next_index < length else ""
             prefix = source[start:index].strip()
-            # A period inside a decimal/version and a numbered list marker are
-            # not useful sentence boundaries for the tiny streaming preview.
+            # Decimal dots, version dots, and numbered-list markers are not sentence boundaries here.
             is_terminator = (
                 next_index >= length
                 or next_character.isspace()
@@ -1469,8 +1457,7 @@ class ThinkingPreview(QWidget):
         return self._current_sentence[: self._visible_characters]
 
     def set_reasoning(self, reasoning: str) -> None:
-        # Keep the preview on one line while preserving the raw streaming
-        # tail.  In particular, do not wait for a sentence-ending character.
+        # Keep the preview on one line while preserving the raw streaming tail.
         source = " ".join(str(reasoning or "").split())
         if source == self._reasoning_text:
             return
@@ -1530,9 +1517,7 @@ class ThinkingPreview(QWidget):
             return
 
         metrics = QFontMetricsF(self.font())
-        # Include the fade region in the segment so the final characters are
-        # present underneath the gradient instead of being hard-clipped at
-        # the first pixel outside the header.
+        # Include the fade region so final characters remain under the gradient.
         max_width = max(1.0, float(self.width())) + self.FADE_WIDTH
         segments: list[str] = []
         starts: list[int] = []
@@ -1560,8 +1545,7 @@ class ThinkingPreview(QWidget):
         self._sentences = segments
         self._segment_starts = starts
         if starts:
-            # Keep the current window stable when a new stream chunk arrives;
-            # after a resize, choose the window that contains its old start.
+            # Keep the current window stable across new chunks and resizes.
             index = 0
             for candidate, candidate_start in enumerate(starts):
                 if candidate_start <= old_start:
@@ -1616,9 +1600,7 @@ class ThinkingPreview(QWidget):
                     )
                 ),
             )
-            # A streaming update can extend the current width window while
-            # its timer is already part-way through the typing phase.  Never
-            # retract characters that were already painted in that case.
+            # Do not retract characters already painted when a streaming window grows.
             visible = max(self._visible_characters, target_visible)
         else:
             visible = len(self._current_sentence)
@@ -1740,9 +1722,7 @@ class ReasoningPanel(QFrame):
             self.indicator.stop()
             self.toggle.setText("已完成深度思考")
             self.preview.stop()
-            # Keep the expanding preview slot in the header even when its
-            # text is empty. Hiding that item makes QBoxLayout redistribute
-            # the remaining controls around the center of the panel.
+            # Keep the preview slot reserved so the header controls do not shift when it is empty.
             self.preview.show()
         self._refresh_arrow()
 
@@ -1822,8 +1802,7 @@ class OpenImageLabel(QLabel):
             background_color=palette["canvas"],
         )
         super().setPixmap(self._thumbnail)
-        # The border is already part of _thumbnail.  A stylesheet border here
-        # would be a second stroke and can cover its antialiased corners.
+        # The thumbnail already owns its border; a second stylesheet stroke can cover antialiased corners.
         self.setStyleSheet("background:transparent;border:none;")
         self.update()
 
@@ -2109,9 +2088,7 @@ class AssistantBubble(MessageBubble):
             else ReasoningPanel.THINKING_PHASE
         )
         if self.reasoning_panel is not None:
-            # A tool-call preamble may already have caused begin_answer() to
-            # stop the panel. Every status event is a fresh operation phase,
-            # so explicitly restart the running state here.
+            # Restart the panel for each fresh status phase after a tool-call preamble.
             self.reasoning_panel.set_phase(self._operation_phase)
             self.reasoning_panel.set_running(True)
             if self.status_row.isVisible():
@@ -2119,8 +2096,7 @@ class AssistantBubble(MessageBubble):
                 self.layoutHeightChanged.emit()
             return
 
-        # Standard mode has no reasoning content, but a web-search request
-        # still needs to expose what the worker is doing.
+        # Standard mode still exposes web-search progress even without reasoning content.
         label = (
             "正在联网搜索"
             if self._operation_phase == ReasoningPanel.SEARCHING_PHASE
@@ -2651,9 +2627,7 @@ class ChatView(QScrollArea):
                 self._catch_up_active = False
         else:
             distance = maximum - current
-            # While the answer keeps growing the lane has to move at least as
-            # fast as the content does, so the newest text stays pinned to the
-            # bottom of the viewport instead of sliding out of sight.
+            # Match content growth so the newest text stays pinned to the viewport bottom.
             step = max(growth, min(140, max(1, ceil(distance * 0.42))))
             target = current + step
         self._programmatic_scroll = True

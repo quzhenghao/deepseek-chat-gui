@@ -184,8 +184,7 @@ def _extract_math(text: str) -> tuple[str, list[tuple[str, str, bool]]]:
     """Replace formulas outside Markdown code spans/fences with safe tokens."""
 
     if "$" not in text and "\\" not in text:
-        # No dollar sign and no backslash means no math delimiter can appear,
-        # so the character-by-character scan can be skipped entirely.
+        # Without a dollar sign or backslash, no math delimiter can appear.
         return text, []
 
     output: list[str] = []
@@ -471,8 +470,7 @@ def _leading_fence_marker(source: str) -> tuple[str, int] | None:
     return None
 
 
-# Rendered code blocks grow by appending raw text to the ``<code>`` element,
-# so the frozen HTML keeps a hole where that text has to land.
+# Rendered code blocks append raw text into a reserved ``<code>`` element hole.
 _CODE_PLACEHOLDER = "DEEPSEEKSTREAMCODEPLACEHOLDER"
 
 
@@ -552,9 +550,7 @@ class StreamingMarkdown:
         return self._displayed_code_tail()
 
     def _displayed_code_tail(self) -> str:
-        # Markdown drops a trailing whitespace-only line of a code block.  It
-        # is still carried verbatim, because indentation that arrives later
-        # must keep it.
+        # Preserve trailing whitespace-only code lines because later indentation must keep them.
         return self._code_tail if self._code_tail.strip() else ""
 
     @property
@@ -700,8 +696,7 @@ class StreamingMarkdown:
         return rendered[:index] + rendered[index + len(_CODE_PLACEHOLDER) :]
 
     def _freeze_open_fence(self, tail: str) -> tuple[str, str, str]:
-        # The first fragment continues the line that is still being typed, so
-        # it is prepended before the closing marker of the fence is looked for.
+        # Prepend the first fragment to the active line before finding the fence.
         lines = tail.split("\n")
         if self._code_tail:
             lines = [self._code_tail + lines[0], *lines[1:]]

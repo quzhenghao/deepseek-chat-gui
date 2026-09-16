@@ -63,9 +63,7 @@ def rounded_thumbnail(
     painter.drawPixmap(0, 0, scaled.copy(left, top, size, size))
 
     if border_color is not None:
-        # Center a one-pixel pen on the inside edge so the complete stroke is
-        # retained by the thumbnail surface instead of being clipped by its
-        # outer bounds.
+        # Center the one-pixel pen inside the edge so the thumbnail keeps the full stroke.
         inset = THUMBNAIL_BORDER_WIDTH / 2
         border_rect = QRectF(
             inset,
@@ -126,9 +124,7 @@ class ThumbView(QLabel):
                 background_color=palette["canvas"],
             )
         )
-        # The border is part of the pixmap.  Keeping the QLabel surface
-        # transparent prevents a second style-layer border from competing
-        # with the composited corner pixels.
+        # The pixmap owns the border, so a transparent QLabel avoids a competing stroke.
         self.setStyleSheet("background:transparent;border:none;")
 
     def mouseReleaseEvent(self, event) -> None:

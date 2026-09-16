@@ -68,14 +68,10 @@ SIDEBAR_MIN_WIDTH = 220
 RAIL_SIDEBAR_WIDTH = 56
 MESSAGE_CONTENT_MAX_WIDTH = 820
 
-# Keep message surfaces and the image thumbnails inside them on the same
-# corner curve.  The value is in logical Qt pixels and is shared by the
-# custom thumbnail painter as well as the user-message QSS surface.
+# Keep message surfaces and thumbnails on the same logical-pixel corner curve.
 CHAT_BUBBLE_RADIUS = 14
 
-# Keep the two right-hand product surfaces aligned when switching between
-# Chat and Settings.  The top bars intentionally share both their height and
-# horizontal padding so the content below them starts on the same rhythm.
+# Keep Chat and Settings aligned by sharing top-bar height, margins, and padding.
 RIGHT_HEADER_HEIGHT = 58
 RIGHT_HEADER_MARGINS = (20, 8, 16, 8)
 RIGHT_HEADER_SPACING = 8

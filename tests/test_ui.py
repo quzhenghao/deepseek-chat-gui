@@ -358,9 +358,9 @@ class UITests(unittest.TestCase):
         bubble.set_content(content)
         body = bubble.content_view
 
-        # Everything the worker sent is already buffered ...
+        # The worker output is already buffered.
         self.assertEqual(bubble._plain, content)
-        # ... while the screen is still catching up through the animation.
+        # The screen catches up through the reveal animation.
         self.assertTrue(self.wait_for(lambda: body.is_revealing))
         self.assertLess(body.frontier, body.document_height)
 
@@ -505,6 +505,39 @@ class UITests(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: not body.is_revealing, timeout_ms=8000))
         self.assertGreaterEqual(body.height(), body.document_height)
 
+    def test_final_long_web_repaint_keeps_the_tail_reserved(self) -> None:
+        view = ChatView()
+        view.resize(720, 600)
+        view.show()
+        bubble = view.add_streaming("模型 · 标准模式", False)
+        source = (
+            "```python\n"
+            + "".join(f"line_{index:05d} = {index}\n" for index in range(600))
+            + "```\n\n尾部标记：最终内容"
+        )
+        bubble.set_content(source)
+        body = bubble.content_view
+        self.assertTrue(
+            self.wait_for(lambda: body.document_height > body.tile_height, 12000)
+        )
+
+        bubble.finish()
+        self.assertTrue(
+            self.wait_for(lambda: not body.is_revealing, timeout_ms=20000)
+        )
+        self.assertGreater(body.document_height, body.tile_height)
+        self.assertGreaterEqual(body.height(), body.document_height)
+        tiles = self.message_tiles(bubble)
+        self.assertGreaterEqual(len(tiles), 2)
+        self.assertIn("尾部标记：最终内容", self.surface_metrics(tiles[-1])["text"])
+        self.assertTrue(
+            self.wait_for(
+                lambda: view.verticalScrollBar().value()
+                >= view.verticalScrollBar().maximum() - 2
+            )
+        )
+        view.close()
+
     def test_reasoning_preview_fills_width_and_keeps_streaming_tail_at_60fps(self) -> None:
         self.assertEqual(
             _extract_complete_sentences("第一句。第二句！还没有结束"),
@@ -592,10 +625,7 @@ class UITests(unittest.TestCase):
         self.assertEqual(bubble.reasoning_panel.toggle.text(), "正在深度思考")
         self.assertFalse(bubble.status_row.isVisible())
 
-        # A model may emit a short tool-call preamble before the worker knows
-        # that it needs to search. The status transition must restart the
-        # reasoning indicator instead of leaving the panel in its completed
-        # state.
+        # A tool-call preamble must not leave the reasoning indicator completed.
         bubble.set_content("我先搜索一下")
         bubble.set_status("正在联网搜索…")
         self.app.processEvents()
@@ -1258,6 +1288,91 @@ class UITests(unittest.TestCase):
         self.assertTrue(window.welcome_suggestions.isVisible())
         window.close()
 
+    def test_welcome_composer_expands_upward_and_restores_suggestions(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(920, 640)
+        window.show()
+        self.app.processEvents()
+
+        panel = window.input_panel
+
+        def panel_bottom() -> int:
+            return panel.geometry().y() + panel.geometry().height()
+
+        initial_top = panel.geometry().top()
+        initial_bottom = panel_bottom()
+        suggestion_height = window._welcome_suggestions_height
+        self.assertTrue(window.welcome_suggestions.isVisible())
+
+        panel.expand_button.click()
+        QTest.qWait(70)
+        self.app.processEvents()
+        self.assertTrue(window.welcome_suggestions.isVisible())
+        self.assertGreater(window.welcome_suggestions.maximumHeight(), 0)
+        self.assertLess(panel.geometry().top(), initial_top)
+        self.assertLessEqual(abs(panel_bottom() - initial_bottom), 1)
+        self.assertTrue(
+            self.wait_for(
+                lambda: window.chat_input.height() == ChatTextEdit.EXPANDED_HEIGHT
+            )
+        )
+        self.assertFalse(window.welcome_suggestions.isVisible())
+        self.assertEqual(panel_bottom(), initial_bottom)
+
+        panel.expand_button.click()
+        QTest.qWait(70)
+        self.app.processEvents()
+        self.assertTrue(window.welcome_suggestions.isVisible())
+        self.assertLess(window.welcome_suggestions.maximumHeight(), suggestion_height)
+        self.assertLessEqual(abs(panel_bottom() - initial_bottom), 1)
+        self.assertTrue(
+            self.wait_for(
+                lambda: window.chat_input.height() == ChatTextEdit.COLLAPSED_HEIGHT
+            )
+        )
+        self.assertTrue(window.welcome_suggestions.isVisible())
+        self.assertEqual(window.welcome_suggestions.maximumHeight(), suggestion_height)
+        self.assertEqual(panel_bottom(), initial_bottom)
+        window.close()
+
+    def test_chat_composer_expands_from_a_fixed_bottom_edge(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(920, 700)
+        window.show()
+        window.chat_workspace.set_page(window.chat_view)
+        window.chat_view.add_user("已有聊天内容")
+        self.app.processEvents()
+
+        panel = window.input_panel
+        def panel_bottom() -> int:
+            return panel.geometry().y() + panel.geometry().height()
+
+        expected_bottom = window.chat_workspace.height()
+        panel.expand_button.click()
+        QTest.qWait(70)
+        self.app.processEvents()
+        self.assertLessEqual(abs(panel_bottom() - expected_bottom), 1)
+        self.assertTrue(
+            self.wait_for(
+                lambda: window.chat_input.height() == ChatTextEdit.EXPANDED_HEIGHT
+            )
+        )
+        self.assertLessEqual(abs(panel_bottom() - expected_bottom), 1)
+        panel.expand_button.click()
+        self.assertTrue(
+            self.wait_for(
+                lambda: window.chat_input.height() == ChatTextEdit.COLLAPSED_HEIGHT
+            )
+        )
+        self.assertEqual(panel_bottom(), expected_bottom)
+        window.close()
+
     def test_clearing_uploaded_images_restores_the_composer_height(self) -> None:
         cfg = dict(DEFAULTS)
         cfg["models"] = list(DEFAULTS["models"])
@@ -1791,8 +1906,7 @@ class UITests(unittest.TestCase):
         self.assertLessEqual(limit, WEB_SURFACE_TEXTURE_LIMIT)
         self.assertGreaterEqual(limit, 1200)
 
-        # The lane owns scrolling: a surface is one fixed window of the
-        # answer, never a scroll container of its own.
+        # The lane owns scrolling; each surface is a fixed answer window.
         self.assertNotIn("internalScroll", _MATH_WEB_SHELL)
         self.assertIn("overflow: hidden", _MATH_WEB_SHELL)
         self.assertIn("bridge.scrollVertically", _MATH_WEB_SHELL)
@@ -1845,7 +1959,7 @@ class UITests(unittest.TestCase):
                 "every tile paints the same document",
             )
 
-        # The end of the answer must be painted by the last tile's window.
+        # The last tile must paint the end of the answer.
         last_metrics = self.surface_metrics(tiles[-1])
         self.assertIn("回答尾部", last_metrics["text"])
         window_start = (len(tiles) - 1) * limit
@@ -1855,7 +1969,7 @@ class UITests(unittest.TestCase):
             last_metrics["documentHeight"],
         )
 
-        # ... and the chat lane alone scrolls to it.
+        # The chat lane alone scrolls to the tail.
         view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
         self.app.processEvents()
         self.assertGreater(view.verticalScrollBar().value(), 0)

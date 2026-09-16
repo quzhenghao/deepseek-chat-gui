@@ -34,11 +34,7 @@ fi
 "$PYTHON_BIN" -m PyInstaller --clean --noconfirm \
   --workpath "$BUILD_DIR" --distpath "$DIST_DIR" "$SPEC_FILE"
 
-# PyInstaller 6.22 can relocate the extra QtWebEngineCore framework
-# resources into ``Versions/Resources``.  That layout leaves the framework's
-# top-level Resources/Helpers links dangling and makes the app fail recursive
-# code-signature validation.  Restore the layout shipped by PySide6 before
-# staging the bundle, then sign the repaired bundle again.
+# Restore PySide6's QtWebEngineCore resource layout before staging and re-signing the app.
 QT_WEBENGINE_FRAMEWORK="$DIST_APP/Contents/Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework"
 QT_WEBENGINE_EXTRA="$QT_WEBENGINE_FRAMEWORK/Versions/Resources"
 if [ -d "$QT_WEBENGINE_EXTRA" ]; then

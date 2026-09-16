@@ -248,8 +248,7 @@ def load_config() -> dict[str, Any]:
                     saved_catalog_version < MODEL_CATALOG_VERSION
                     and uses_official_api(cfg.get("base_url"))
                 ):
-                    # Keep a user's saved choices, but add newly supported
-                    # built-in official routes during a catalog migration.
+                    # Keep saved choices while adding supported routes during catalog migration.
                     saved_models = cfg.get("models") or []
                     if isinstance(saved_models, str):
                         saved_models = saved_models.splitlines()

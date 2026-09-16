@@ -160,12 +160,7 @@ class HarnessSurface(QWidget):
         return view
 
     def _load_url(self, view: QWebEngineView, url: str) -> None:
-        # Harness authenticates each loopback server instance with a cookie
-        # whose name is derived from the server's random port.  Persisting
-        # those cookies across launches leaves one stale auth cookie per
-        # restart; the resulting Cookie header can make the plugin bundle
-        # request fail before the UI is bootstrapped.  This profile is private
-        # to Harness, so starting a new page with a clean cookie jar is safe.
+        # Harness cookies include the random port, so a private clean profile avoids stale authentication.
         if self._profile is not None:
             self._profile.cookieStore().deleteAllCookies()
         view.load(QUrl(url))
@@ -174,10 +169,7 @@ class HarnessSurface(QWidget):
         if self._web_view is not None:
             return self._web_view
         self._profile = QWebEngineProfile("deepseek-harness-desktop", self)
-        # Do not restore the old on-disk dsh-auth-* cookies.  They are bound
-        # to a previous random loopback port and are not reusable by a new
-        # Harness runtime.  Keeping the profile session-only also prevents
-        # the same accumulation from recurring after this upgrade.
+        # Do not restore dsh-auth cookies from an old port; keep the profile session-only.
         self._profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies
         )
