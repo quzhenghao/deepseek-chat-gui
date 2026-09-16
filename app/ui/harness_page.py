@@ -223,15 +223,7 @@ class HarnessSurface(QWidget):
             self._reveal_web()
 
     def dispose(self) -> None:
-        """Retire WebEngine objects through Qt's event loop.
-
-        Calling ``shiboken.delete`` on a live QWebEngineView tears down the
-        Qt Quick scene graph synchronously while Chromium may still be
-        delivering a frame.  On macOS that can crash in
-        ``QQuickWindow::~QQuickWindow``.  Hide and discard the page first,
-        then let Qt destroy the view and profile in their normal ownership
-        order.
-        """
+        """Retire WebEngine objects asynchronously through Qt ownership."""
 
         if self._disposing:
             return

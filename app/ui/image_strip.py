@@ -32,13 +32,7 @@ def rounded_thumbnail(
     border_color: str | QColor | None = None,
     background_color: str | QColor | None = None,
 ) -> QPixmap:
-    """Return one composited thumbnail surface.
-
-    The image clip and its border deliberately live in the same painter.  A
-    QLabel stylesheet paints its border separately from the pixmap, which can
-    let an opaque square pixmap cover the antialiased corner pixels and make
-    the border look broken.
-    """
+    """Composite one rounded thumbnail and border on the same surface."""
 
     radius = min(float(THUMBNAIL_RADIUS), size / 2)
     image = QImage(path)

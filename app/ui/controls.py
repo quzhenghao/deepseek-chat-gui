@@ -66,19 +66,7 @@ def _apply_rounded_mask(widget: QWidget, radius: float = 12) -> None:
 
 
 def build_flat_menu(parent=None) -> QMenu:
-    """Menu that Qt paints itself with the app's flat, opaque surface.
-
-    macOS renders a plain QMenu as a native panel with a translucent vibrancy
-    material.  Asking for a translucent background makes Qt draw the menu
-    itself, so the style sheet's solid white (or dark) sheet is what the user
-    actually sees.  The menu deliberately has no QWidget parent: callers such
-    as QTextBrowser set a local ``background: transparent`` stylesheet, and
-    Qt propagates that stylesheet to child menus before the application-level
-    QMenu rule can paint the panel.
-
-    ``parent`` remains accepted for source compatibility, but is intentionally
-    not passed to QMenu.
-    """
+    """Build an unparented menu so the app paints an opaque flat surface."""
 
     menu = QMenu()
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -179,12 +167,7 @@ class FlatPlainTextEdit(QPlainTextEdit):
 
 
 class FrameAnimator(QObject):
-    """Ramp a float on a precise 16 ms timer with a smooth ease-in-out curve.
-
-    Layout transitions in this app animate geometry directly (splitter sizes,
-    widget offsets), so a plain value ramp with a fixed 60 fps tick is both
-    cheaper and more predictable than a property animation per frame.
-    """
+    """Ramp a float at 60 fps with a smooth ease-in-out curve."""
 
     valueChanged = Signal(float)
     finished = Signal()
@@ -305,11 +288,7 @@ QListView#roundedComboView QScrollBar::sub-line:vertical {{
 
 
 class RoundedMenu(QMenu):
-    """Rounded menu surface kept for callers that still import it.
-
-    The application itself uses platform menus for text selection and
-    right-click actions, so macOS renders its own native menu.
-    """
+    """Retain the legacy rounded-menu import for external callers."""
 
     def __init__(self, theme: str = "light", parent=None) -> None:
         super().__init__(parent)

@@ -1,11 +1,4 @@
-"""Lifecycle bridge for the official DeepSeek Harness Web UI.
-
-The desktop client intentionally does not reimplement the Harness agent loop.
-It starts the official ``dsh web`` distribution on loopback and embeds that
-first-party UI in a Qt WebEngine surface.  The subprocess receives the same
-DeepSeek endpoint and API key as Chat, while its persistent home is isolated
-under this application's data directory.
-"""
+"""Run the official Harness Web UI inside an isolated local Qt surface."""
 
 from __future__ import annotations
 
@@ -108,13 +101,7 @@ def find_free_port() -> int:
 
 
 def _configure_process_isolation(process: QProcess) -> bool:
-    """Detach the Harness child from the launching terminal on Unix.
-
-    QProcess does not open a terminal itself, but npm can inherit the parent's
-    session and later spawn a child that behaves like a foreground command.
-    A new session makes the whole npx/node tree a quiet, owned process group
-    that can be stopped together when the desktop app exits.
-    """
+    """Place the Unix Harness process tree in an app-owned session."""
 
     parameters_type = getattr(QProcess, "UnixProcessParameters", None)
     flags_type = getattr(QProcess, "UnixProcessFlag", None)

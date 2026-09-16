@@ -1,10 +1,4 @@
-"""Persist crash and exception details for the desktop client.
-
-The app is usually launched from an IDE or a macOS bundle, so Python tracebacks
-that only reach stderr disappear with the window.  This module mirrors fatal
-signals and unhandled exceptions into ``~/.deepseek_chat_gui/logs`` so an
-unexpected exit can be diagnosed afterwards.
-"""
+"""Persist otherwise hidden desktop crash and exception details."""
 
 from __future__ import annotations
 

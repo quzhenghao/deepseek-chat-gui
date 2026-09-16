@@ -811,13 +811,7 @@ def stream_search_function(
     timeout: tuple[int, int] = (10, 600),
     response_callback: Callable[[requests.Response | None], None] | None = None,
 ) -> Iterator[tuple[str, str]]:
-    """Run the official tool loop until the model produces a sourced answer.
-
-    Tools stay available in every round, so the model keeps emitting
-    structured `tool_calls` instead of leaking harness-style `<zenith_calls>`
-    blocks into prose. Search and page results are registered in one global
-    source list, which keeps inline citation numbers stable across rounds.
-    """
+    """Run tool rounds until the model returns one consistently sourced answer."""
 
     if stop.is_set():
         return

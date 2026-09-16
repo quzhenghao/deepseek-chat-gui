@@ -125,14 +125,7 @@ def uses_official_api(base_url: Any) -> bool:
 
 
 def normalize_official_models(models: Any) -> list[str]:
-    """Normalize a live official model response for the app's built-in catalog.
-
-    The endpoint is authoritative for availability, while the client owns the
-    user-facing aliases/capabilities.  We retain the current Flash and Pro
-    routes and silently omit explicitly retired routes.  Unknown future IDs
-    are kept as manual choices so an account can still use a newly published
-    route before a client release updates its capability metadata.
-    """
+    """Merge live official models with client aliases and retirement rules."""
 
     if isinstance(models, str):
         source = models.splitlines()

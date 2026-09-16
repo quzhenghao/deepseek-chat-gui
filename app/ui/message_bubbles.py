@@ -364,12 +364,7 @@ class _MathWebView(QWebEngineView):
         )
 
     def _surface_height_limit(self) -> int:
-        """Largest safe web surface, in logical pixels, for this screen.
-
-        Chromium reduces any surface taller than the GPU texture budget, which
-        silently blanks the tail of the page, so one answer is painted by
-        several tiles of at most this height instead.
-        """
+        """Return this screen's largest GPU-safe logical surface height."""
 
         screen = self.screen() or QGuiApplication.primaryScreen()
         ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
@@ -590,13 +585,7 @@ class MessageTextBrowser(QTextBrowser):
 
 
 class _RevealCurtain(QWidget):
-    """Soft edge that fades the newest message text from light to dark.
-
-    The reveal frontier itself is animated by resizing the message viewport,
-    which Qt composites without repainting the embedded Chromium surfaces.
-    This strip only paints the gradient that makes the emerging text look like
-    it is still developing instead of ending in a hard cut.
-    """
+    """Paint the soft gradient edge of newly revealed answer text."""
 
     MIN_BAND = 42
     MAX_BAND = 260
@@ -644,12 +633,7 @@ class _RevealCurtain(QWidget):
 
 
 def _surface_height_limit(widget: QWidget) -> int:
-    """Largest web surface, in logical pixels, this screen can composite.
-
-    Chromium silently reduces anything taller than the GPU texture budget,
-    which blanks the tail of the page, so a long answer is painted by several
-    tiles of at most this height instead of one oversized surface.
-    """
+    """Return the largest GPU-safe logical surface height for a widget."""
 
     screen = widget.screen() or QGuiApplication.primaryScreen()
     ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
@@ -841,11 +825,7 @@ class RichText(QWidget):
         reveal_characters: int | None = None,
         reveal_total_characters: int | None = None,
     ) -> None:
-        """Show a finished body (history, reasoning) without streaming.
-
-        ``reveal_characters`` / ``reveal_total_characters`` keep the legacy
-        API: when they are given the body fades in from its first line.
-        """
+        """Show a finished body and optionally preserve the legacy fade-in API."""
 
         if self._disposed:
             return
@@ -1227,8 +1207,9 @@ class RichText(QWidget):
             self._set_content_height(max(22, self._text_document_height()))
 
     def _set_content_height(self, height: int) -> None:
-        if abs(self.height() - height) > 1:
-            self.setFixedHeight(height)
+        target = max(1, int(height))
+        if self.height() != target:
+            self.setFixedHeight(target)
             self.heightChanged.emit()
 
     def resizeEvent(self, event) -> None:
@@ -1343,13 +1324,7 @@ def _sentence_spans(
     *,
     include_streaming_tail: bool = False,
 ) -> list[tuple[int, int]]:
-    """Return source ranges whose starts are sentence starts.
-
-    The preview can still show an unfinished streaming tail, but a new
-    visual segment must never begin in the middle of a sentence.  Keeping
-    source offsets here lets the width-aware segmenter use sentence
-    boundaries without changing the text that is drawn.
-    """
+    """Return sentence-aligned source ranges, including an optional live tail."""
 
     source = str(text or "")
     spans: list[tuple[int, int]] = []
@@ -1406,13 +1381,7 @@ def _sentence_spans(
 
 
 class ThinkingPreview(QWidget):
-    """A width-aware, 60fps ticker for the collapsed reasoning header.
-
-    The source is packed into visual-width windows, but each window begins at
-    a sentence boundary.  A streaming tail is kept in the source so the
-    header can remain informative before the next terminator arrives.  The
-    right edge of each window is softened by the paint-time fade.
-    """
+    """Show sentence-aligned reasoning windows in a 60 fps faded ticker."""
 
     FRAME_INTERVAL_MS = 16
     TYPING_DURATION_MS = 500

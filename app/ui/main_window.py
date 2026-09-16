@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
@@ -467,14 +468,7 @@ class InputPanel(QWidget):
 
 
 class ChatWorkspace(QWidget):
-    """Stack the conversation surface and keep the composer in the right place.
-
-    The empty state uses the same composer as a normal conversation, but lets
-    it float into the visual center of the canvas.  Once a conversation has
-    messages the composer floats at the bottom of the canvas while the message
-    viewport ends directly above it.  The full-size stack keeps the surrounding
-    canvas continuous, so the card retains its floating silhouette.
-    """
+    """Place one composer at the welcome center or conversation bottom."""
 
     FOLLOW_BUTTON_GAP = 16
 
@@ -657,6 +651,14 @@ class ChatWorkspace(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if (
+            not self._welcome_transition_active
+            and self._stack is not None
+            and self._panel is not None
+            and self._stack.currentWidget() is self._welcome
+            and not self._panel.editor.is_expanded()
+        ):
+            self._welcome_panel_bottom = None
         self._sync_layout()
 
 
@@ -936,6 +938,9 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
         suggestions.setMaximumWidth(620)
+        self._welcome_suggestions_effect = QGraphicsOpacityEffect(suggestions)
+        self._welcome_suggestions_effect.setOpacity(1.0)
+        suggestions.setGraphicsEffect(self._welcome_suggestions_effect)
         grid = QGridLayout(suggestions)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(8)
@@ -967,9 +972,12 @@ class MainWindow(QMainWindow):
         progress = max(0.0, min(1.0, float(progress)))
         self._welcome_compact_progress = progress
         remaining = 1.0 - progress
+        compression = max(0.0, min(1.0, (progress - 0.25) / 0.75))
+        height_remaining = 1.0 - compression
+        self._welcome_suggestions_effect.setOpacity(remaining)
         self.welcome_suggestions.setMinimumHeight(0)
         self.welcome_suggestions.setMaximumHeight(
-            max(0, round(self._welcome_suggestions_height * remaining))
+            max(0, round(self._welcome_suggestions_height * height_remaining))
         )
         self.welcome_suggestions.setVisible(
             not (self._welcome_compact_target and progress >= 1.0)

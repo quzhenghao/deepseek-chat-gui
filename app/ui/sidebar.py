@@ -47,12 +47,7 @@ def _format_time(value: str) -> str:
 
 
 class _ModeIndexCompat:
-    """Small compatibility facade for callers that used the former combo API.
-
-    The visible control is now a pair of buttons.  Keeping this read/write
-    facade avoids breaking integrations that only queried ``mode_combo`` while
-    ensuring no combo box is rendered for product switching.
-    """
+    """Preserve the former mode-combo index API for external callers."""
 
     _DATA = ("chat", "harness")
 

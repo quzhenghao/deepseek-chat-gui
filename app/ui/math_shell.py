@@ -1,23 +1,4 @@
-"""HTML/JS shell rendered inside every inline math/code web surface.
-
-The chat lane is the only scroller in the application, and Chromium refuses to
-composite a widget taller than the GPU texture budget, so one long answer is
-painted by a stack of fixed-height *tiles*.  Every tile renders the same
-document and is translated by ``-offset``, so it shows exactly the rows
-``[offset, offset + height)`` of that document; stacked without gaps they form
-one continuous, unlimited page.
-
-The shell therefore only keeps the document in sync:
-
-``setDeepSeekDocument``  replace style + frozen HTML + live tail
-``setDeepSeekStream``    append newly frozen HTML and swap the live tail
-``setDeepSeekOffset``    choose which slice of the document a tile shows
-
-Revealing the newest text is animated by the host, which grows the message
-viewport and fades its edge with a native gradient curtain.  Nothing inside
-Chromium changes per frame, so the animation keeps display refresh rate no
-matter how long the answer is.
-"""
+"""Render synchronized slices of one Markdown document in GPU-safe web tiles."""
 
 from __future__ import annotations
 
@@ -40,10 +21,12 @@ MATH_WEB_SHELL = r"""<!doctype html>
     }
     #content-root {
       box-sizing: border-box;
+      display: flow-root;
       width: 100%;
       min-height: 1px;
       background: transparent;
     }
+    #content-root > .markdown-body { display: flow-root; }
     a, button, .code-copy { cursor: pointer; }
     .deepseek-stream-anchor { display: block; height: 0; margin: 0;
       padding: 0; border: none; }
@@ -58,16 +41,13 @@ MATH_WEB_SHELL = r"""<!doctype html>
       const root = document.getElementById("content-root");
       const body = document.createElement("div");
       body.className = "markdown-body";
-      // Frozen HTML is appended before this anchor and the live tail is kept
-      // after it, so a growing answer never re-renders what is on screen.
+      // This anchor separates frozen HTML from the replaceable live tail.
       const tailAnchor = document.createElement("span");
       tailAnchor.className = "deepseek-stream-anchor";
       let bridge = null;
-      // The text node that holds the still-growing last line of an open code
-      // fence, so frozen code lines can be appended in front of it.
+      // Keep an open code fence's growing line in one replaceable text node.
       let codeTailNode = null;
-      // Document y where the newest update started changing pixels; tiles
-      // entirely above it never have to be touched again.
+      // Track the first changed row so older tiles can skip an update.
       let lastChangedTop = 0;
       let reportedHeight = -1;
 
@@ -75,10 +55,33 @@ MATH_WEB_SHELL = r"""<!doctype html>
 
       const top = () => root.getBoundingClientRect().top;
 
-      const documentHeight = () => Math.max(
-        1,
-        Math.ceil(body.getBoundingClientRect().height)
+      const contentHeight = () => {
+        const rootRect = root.getBoundingClientRect();
+        const bodyRect = body.getBoundingClientRect();
+        return Math.max(
+          1,
+          root.scrollHeight,
+          body.offsetTop + body.scrollHeight,
+          bodyRect.bottom - rootRect.top
+        );
+      };
+
+      const heightReserve = (height) => Math.min(
+        32,
+        2 + Math.ceil(Math.max(1, height) / 2048)
       );
+
+      const layoutExtent = () => {
+        const content = Math.ceil(contentHeight());
+        const reserve = heightReserve(content);
+        return {
+          contentHeight: content,
+          heightReserve: reserve,
+          documentHeight: Math.max(1, content + reserve)
+        };
+      };
+
+      const documentHeight = () => layoutExtent().documentHeight;
 
       const changedTop = () => {
         const rect = tailAnchor.getBoundingClientRect();
@@ -176,11 +179,14 @@ MATH_WEB_SHELL = r"""<!doctype html>
         if (bridge) bridge.reportLayout(height, lastChangedTop);
       };
 
-      const snapshot = () => JSON.stringify({
-        documentHeight: documentHeight(),
-        changedTop: lastChangedTop,
-        characters: (body.textContent || "").length
-      });
+      const snapshot = () => {
+        const extent = layoutExtent();
+        return JSON.stringify({
+          ...extent,
+          changedTop: lastChangedTop,
+          characters: (body.textContent || "").length
+        });
+      };
 
       window.setDeepSeekDocument = (payload) => {
         const data = typeof payload === "string" ? JSON.parse(payload) : payload;
@@ -258,12 +264,15 @@ MATH_WEB_SHELL = r"""<!doctype html>
         return documentHeight();
       };
 
-      window.deepSeekDebugState = () => JSON.stringify({
-        documentHeight: documentHeight(),
-        changedTop: lastChangedTop,
-        characters: (body.textContent || "").length,
-        error: window.__deepSeekLastError
-      });
+      window.deepSeekDebugState = () => {
+        const extent = layoutExtent();
+        return JSON.stringify({
+          ...extent,
+          changedTop: lastChangedTop,
+          characters: (body.textContent || "").length,
+          error: window.__deepSeekLastError
+        });
+      };
 
       const caretAt = (x, y) => {
         const px = Math.max(0, Math.min(window.innerWidth - 1, x));
@@ -333,8 +342,7 @@ MATH_WEB_SHELL = r"""<!doctype html>
         });
       }
 
-      // The chat lane owns scrolling: never let a gesture inside a windowed
-      // tile shift the slice it is showing.
+      // Forward vertical gestures because the outer chat lane owns scrolling.
       const lockScroll = () => {
         if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
       };
@@ -361,8 +369,7 @@ MATH_WEB_SHELL = r"""<!doctype html>
         event.preventDefault();
       }, { passive: false });
 
-      // A failed update must never leave a blank surface behind silently, so
-      // every entry point records what went wrong for the host to inspect.
+      // Record entry-point failures so a blank surface remains diagnosable.
       [
         "setDeepSeekDocument",
         "setDeepSeekStream",

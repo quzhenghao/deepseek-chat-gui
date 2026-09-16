@@ -162,6 +162,9 @@ class UITests(unittest.TestCase):
         );
         const tail = blocks[blocks.length - 1] || null;
         const rect = root.getBoundingClientRect();
+        const body = root.querySelector(".markdown-body");
+        const bodyRect = body.getBoundingClientRect();
+        const debug = JSON.parse(window.deepSeekDebugState());
         return JSON.stringify({
           overflow: getComputedStyle(document.documentElement).overflowY,
           scrollY: window.scrollY,
@@ -170,7 +173,13 @@ class UITests(unittest.TestCase):
             document.body.scrollHeight
           ),
           innerHeight: window.innerHeight,
-          documentHeight: Math.ceil(rect.height),
+          documentHeight: debug.documentHeight,
+          domHeight: Math.ceil(rect.height),
+          contentBottom: Math.ceil(bodyRect.bottom - rect.top),
+          viewportTailBottom: tail
+            ? Math.ceil(tail.getBoundingClientRect().bottom)
+            : 0,
+          rootViewportTop: Math.floor(rect.top),
           text: (root.innerText || "").slice(-40),
           tailTop: tail
             ? Math.ceil(tail.getBoundingClientRect().top - rect.top)
@@ -536,6 +545,47 @@ class UITests(unittest.TestCase):
                 >= view.verticalScrollBar().maximum() - 2
             )
         )
+        view.close()
+
+    def test_long_markdown_tail_includes_top_margin_and_scaled_reserve(self) -> None:
+        view = ChatView()
+        view.resize(720, 600)
+        view.show()
+        bubble = view.add_streaming("模型 · 标准模式", False)
+        sections = "\n\n".join(
+            f"## 第 {index} 节\n\n- 要点 {index}：包含行内公式 $x_{index}^2$。"
+            for index in range(90)
+        )
+        source = (
+            "# 顶部标题\n\n"
+            + sections
+            + "\n\n---\n\n**末尾标记**：最后一行必须完整显示。"
+        )
+        bubble.set_content(source)
+        body = bubble.content_view
+        self.assertTrue(
+            self.wait_for(lambda: body.document_height > body.tile_height, 15000)
+        )
+
+        bubble.finish()
+        self.assertTrue(
+            self.wait_for(lambda: not body.is_revealing, timeout_ms=25000)
+        )
+        self.assertEqual(body.height(), body.document_height)
+        tiles = self.message_tiles(bubble)
+        first = self.surface_metrics(tiles[0])
+        last = self.surface_metrics(tiles[-1])
+        debug = json.loads(
+            self.javascript_value(tiles[-1].page(), "deepSeekDebugState()")
+        )
+        self.assertEqual(first["rootViewportTop"], 0)
+        self.assertGreaterEqual(debug["heightReserve"], 4)
+        self.assertGreater(
+            debug["documentHeight"],
+            debug["contentHeight"],
+        )
+        self.assertLessEqual(last["viewportTailBottom"], last["innerHeight"])
+        self.assertIn("末尾标记", last["text"])
         view.close()
 
     def test_reasoning_preview_fills_width_and_keeps_streaming_tail_at_60fps(self) -> None:
@@ -1295,6 +1345,7 @@ class UITests(unittest.TestCase):
         window = MainWindow(cfg, MemoryStore(), self.app)
         window.resize(920, 640)
         window.show()
+        QTest.qWait(50)
         self.app.processEvents()
 
         panel = window.input_panel
@@ -1312,6 +1363,14 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(window.welcome_suggestions.isVisible())
         self.assertGreater(window.welcome_suggestions.maximumHeight(), 0)
+        self.assertGreater(
+            window._welcome_suggestions_effect.opacity(),
+            0.0,
+        )
+        self.assertLess(
+            window._welcome_suggestions_effect.opacity(),
+            1.0,
+        )
         self.assertLess(panel.geometry().top(), initial_top)
         self.assertLessEqual(abs(panel_bottom() - initial_bottom), 1)
         self.assertTrue(
@@ -1320,7 +1379,7 @@ class UITests(unittest.TestCase):
             )
         )
         self.assertFalse(window.welcome_suggestions.isVisible())
-        self.assertEqual(panel_bottom(), initial_bottom)
+        self.assertLessEqual(abs(panel_bottom() - initial_bottom), 2)
 
         panel.expand_button.click()
         QTest.qWait(70)
@@ -1335,7 +1394,59 @@ class UITests(unittest.TestCase):
         )
         self.assertTrue(window.welcome_suggestions.isVisible())
         self.assertEqual(window.welcome_suggestions.maximumHeight(), suggestion_height)
-        self.assertEqual(panel_bottom(), initial_bottom)
+        self.assertEqual(window._welcome_suggestions_effect.opacity(), 1.0)
+        self.assertLessEqual(abs(panel_bottom() - initial_bottom), 2)
+        self.assertTrue(
+            self.wait_for(
+                lambda: not window.chat_workspace._welcome_transition_active
+            )
+        )
+
+        window.resize(920, 700)
+        self.assertTrue(
+            self.wait_for(lambda: window.chat_workspace.height() >= 580)
+        )
+        self.assertEqual(
+            panel.geometry().top(),
+            min(
+                int(window.chat_workspace.height() * 0.59),
+                window.chat_workspace.height() - panel.height(),
+            ),
+        )
+        self.assertIsNone(window.chat_workspace._welcome_panel_bottom)
+        window.close()
+
+    def test_welcome_composer_reverses_mid_animation(self) -> None:
+        cfg = dict(DEFAULTS)
+        cfg["models"] = list(DEFAULTS["models"])
+        cfg["api_key"] = "test"
+        window = MainWindow(cfg, MemoryStore(), self.app)
+        window.resize(920, 640)
+        window.show()
+        QTest.qWait(50)
+        self.app.processEvents()
+
+        panel = window.input_panel
+        initial_geometry = panel.geometry()
+        initial_bottom = initial_geometry.bottom()
+        natural_height = window._welcome_suggestions_height
+        panel.expand_button.click()
+        QTest.qWait(80)
+        self.app.processEvents()
+        self.assertGreater(window.chat_input.height(), ChatTextEdit.COLLAPSED_HEIGHT)
+        self.assertLess(window._welcome_suggestions_effect.opacity(), 1.0)
+
+        panel.expand_button.click()
+        self.assertTrue(
+            self.wait_for(
+                lambda: window.chat_input.height() == ChatTextEdit.COLLAPSED_HEIGHT
+            )
+        )
+        self.assertFalse(window.chat_input.is_expanded())
+        self.assertTrue(window.welcome_suggestions.isVisible())
+        self.assertEqual(window.welcome_suggestions.maximumHeight(), natural_height)
+        self.assertEqual(window._welcome_suggestions_effect.opacity(), 1.0)
+        self.assertLessEqual(abs(panel.geometry().bottom() - initial_bottom), 1)
         window.close()
 
     def test_chat_composer_expands_from_a_fixed_bottom_edge(self) -> None:

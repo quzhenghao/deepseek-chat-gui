@@ -475,15 +475,7 @@ _CODE_PLACEHOLDER = "DEEPSEEKSTREAMCODEPLACEHOLDER"
 
 
 def _stable_prefix_length(tail: str) -> int:
-    """Length of the tail prefix whose blocks can never change again.
-
-    Markdown parses blocks top-down, so a chunk of new text can only modify
-    the block it lands in; every complete block before that one is final.
-    The last top-level block is therefore kept unstable, and the returned
-    length always sits on a top-level block boundary, which makes rendering
-    the frozen prefix on its own byte-for-byte identical to rendering it
-    together with the rest of the document.
-    """
+    """Return the final top-level block prefix that later input cannot change."""
 
     if not tail.strip():
         return 0
@@ -502,17 +494,7 @@ def _stable_prefix_length(tail: str) -> int:
 
 
 class StreamingMarkdown:
-    """Incremental Markdown renderer for a growing streaming answer.
-
-    The renderer keeps two DOM-ready pieces: ``stable_html`` grows by appending
-    the HTML of completed blocks, and ``tail_html`` is re-rendered from the
-    last block on every update.  The model output can therefore stream into a
-    display surface without ever re-parsing or re-rendering the whole answer.
-
-    An open code fence is handled line by line: finished lines are appended to
-    the code element already on screen (``code`` deltas) instead of re-rendering
-    the whole block, which keeps every update proportional to the new text.
-    """
+    """Append final Markdown blocks while replacing only the live tail."""
 
     def __init__(self, dark: bool = False) -> None:
         self._dark = bool(dark)
@@ -721,12 +703,7 @@ class StreamingMarkdown:
         return "", "\n".join(complete) + "\n", ""
 
     def full_html(self) -> str:
-        """Render the whole source in one pass.
-
-        Used once a stream finishes so transient splits (an unterminated
-        formula that only became valid later, a reference link defined after
-        its use) can never leave a stale fragment on screen.
-        """
+        """Render the final source once to resolve transient stream splits."""
 
         return (
             _style_html(self._dark)

@@ -304,8 +304,7 @@ QPushButton#settingsNavBtn:checked {{
     background: {c['accent_soft']};
     border-color: {c['selected']};
 }}
-/* The chat sidebar entry and the settings page exit share one flat surface:
-   they blend into the rail and only darken under the pointer. */
+/* Sidebar entry and settings exit share one hover-only surface. */
 QPushButton#sidebarFooterBtn, QPushButton#settingsBackBtn {{
     color: {c['entry_fg']};
     background: transparent;
@@ -533,8 +532,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 9px; }}
 QScrollBar::handle:horizontal {{ background: {c['border_strong']}; border-radius: 4px; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-/* Menus keep the platform's standard entries but are painted as a plain,
-   opaque surface: macOS would otherwise show a translucent vibrancy panel. */
+/* Paint menus opaquely to avoid macOS vibrancy. */
 QMenu {{
     color: {c['fg']};
     background: {c['panel']};
