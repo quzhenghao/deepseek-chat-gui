@@ -18,8 +18,9 @@ DATA_PATH = APP_DIR / "conversations.json"
 MEDIA_DIR = APP_DIR / "media"
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-MODEL_CATALOG_VERSION = 4
-MAX_OUTPUT_TOKENS = 256_000
+MODEL_CATALOG_VERSION = 5
+MAX_CONTEXT_TOKENS = 1_048_576
+MAX_OUTPUT_TOKENS = 393_216
 
 V41_FLASH_MODEL = "deepseek-flash"
 V4_PRO_MODEL = "deepseek-v4-pro"
@@ -29,22 +30,6 @@ MODEL_LABELS = {
     V4_PRO_MODEL: "DeepSeek V4 Pro",
 }
 
-REMOVED_OFFICIAL_MODELS = {
-    "deepseek-v4-flash",
-    "deepseek-v4-flash-vision-exp",
-}
-LEGACY_MODEL_ALIASES = {
-    "deepseek-v4.1-flash-expires-on-0910": V41_FLASH_MODEL,
-    "deepseek-v41-flash": V41_FLASH_MODEL,
-    "deepseek-v4-flash": V41_FLASH_MODEL,
-    "deepseek-v4-flash-vision-exp": V41_FLASH_MODEL,
-    "deepseek-v4-flash (modlens vision)": V41_FLASH_MODEL,
-    "deepseek-v4-pro (modlens vision)": V41_FLASH_MODEL,
-}
-_COMPACT_LEGACY_MODEL_ALIASES = {
-    re.sub(r"\s+", "-", key): target
-    for key, target in LEGACY_MODEL_ALIASES.items()
-}
 _COMPACT_MODEL_LABEL_ALIASES = {
     re.sub(r"\s+", "-", label.lower()): model
     for model, label in MODEL_LABELS.items()
@@ -57,11 +42,13 @@ MODEL_CAPABILITIES = {
         "vision": True,
         "thinking": True,
         "efforts": tuple(EFFORT_LEVELS),
+        "system_prompt_update": "in-history",
     },
     V4_PRO_MODEL: {
         "vision": False,
         "thinking": True,
         "efforts": tuple(EFFORT_LEVELS),
+        "system_prompt_update": "leading-only",
     },
 }
 
@@ -125,7 +112,7 @@ def uses_official_api(base_url: Any) -> bool:
 
 
 def normalize_official_models(models: Any) -> list[str]:
-    """Merge live official models with client aliases and retirement rules."""
+    """Return supported models present in the official catalog, without duplicates."""
 
     if isinstance(models, str):
         source = models.splitlines()
@@ -134,7 +121,7 @@ def normalize_official_models(models: Any) -> list[str]:
     merged: list[str] = []
     for item in source:
         model = _normalize_model(item)
-        if model and model not in merged:
+        if model in DEFAULT_MODELS and model not in merged:
             merged.append(model)
     return merged
 
@@ -142,15 +129,11 @@ def normalize_official_models(models: Any) -> list[str]:
 def _normalize_model(model: Any) -> str:
     value = str(model or "").strip()
     lowered = value.lower().replace("_", "-")
-    if lowered in LEGACY_MODEL_ALIASES:
-        return LEGACY_MODEL_ALIASES[lowered]
+    if lowered in DEFAULT_MODELS:
+        return lowered
     compacted = re.sub(r"\s+", "-", lowered)
-    if compacted in _COMPACT_LEGACY_MODEL_ALIASES:
-        return _COMPACT_LEGACY_MODEL_ALIASES[compacted]
     if compacted in _COMPACT_MODEL_LABEL_ALIASES:
         return _COMPACT_MODEL_LABEL_ALIASES[compacted]
-    if compacted in REMOVED_OFFICIAL_MODELS:
-        return ""
     return value
 
 
@@ -160,6 +143,13 @@ def _normalize_effort(value: Any) -> str:
 
 
 def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
+    base_url = str(cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        base_url = base_url[: -len("/chat/completions")]
+    if uses_official_api(base_url):
+        base_url = DEFAULT_BASE_URL
+    cfg["base_url"] = base_url
+
     raw_models = cfg.get("models") or []
     if isinstance(raw_models, str):
         raw_models = raw_models.splitlines()
@@ -168,6 +158,8 @@ def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
         model = _normalize_model(item)
         if model and model not in models:
             models.append(model)
+    if uses_official_api(base_url):
+        models = normalize_official_models(models)
     cfg["models"] = models or list(DEFAULT_MODELS)
 
     default_model = _normalize_model(cfg.get("default_model"))
@@ -189,13 +181,6 @@ def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
         )
     except (TypeError, ValueError):
         cfg["search_max_results"] = 5
-
-    base_url = str(cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
-    if base_url == "https://api.deepseek.com/v1":
-        base_url = DEFAULT_BASE_URL
-    if base_url.endswith("/chat/completions"):
-        base_url = base_url[: -len("/chat/completions")]
-    cfg["base_url"] = base_url
 
     try:
         cfg["temperature"] = min(2.0, max(0.0, float(cfg.get("temperature", 1.0))))
@@ -241,7 +226,6 @@ def load_config() -> dict[str, Any]:
                     saved_catalog_version < MODEL_CATALOG_VERSION
                     and uses_official_api(cfg.get("base_url"))
                 ):
-                    # Keep saved choices while adding supported routes during catalog migration.
                     saved_models = cfg.get("models") or []
                     if isinstance(saved_models, str):
                         saved_models = saved_models.splitlines()

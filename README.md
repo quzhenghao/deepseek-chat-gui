@@ -2,13 +2,13 @@
 
 一个面向 macOS 的 DeepSeek API 桌面客户端。它把 Chat、深度思考、联网搜索、图片输入、Markdown/LaTeX、本地历史和官方 Harness 集成到同一个窗口中，界面轻量，数据保存在本机，工作模式可以从顶部一键切换。
 
-当前发布版本：`v1.0.0` · macOS Apple Silicon
+当前发布版本：`v1.1.0` · macOS Apple Silicon
 
 ## 最新版本与下载
 
-> **[前往 GitHub Releases 查看最新版本、更新日志和下载链接 →](https://github.com/quzhenghao/deepseek-chat-gui/releases)**
+> **[前往 GitHub Releases 查看版本说明与下载链接 →](https://github.com/quzhenghao/deepseek-chat-gui/releases/latest)**
 >
-> 请从 Release 页面选择最新版本和对应平台的安装包。README 不固定指向某个旧版本文件，后续更新会持续以 Release 页面为准。
+> 下载 `DeepSeek-1.1.0-macos-arm64.dmg`，适用于 macOS Apple Silicon。
 
 ## ⚠️ 首次打开安全提示
 
@@ -50,7 +50,7 @@
 
 ## 为什么使用本地客户端
 
-- **直接接入 API，模型选择不被网页版入口限制**：本地端使用自己的 DeepSeek API Key。点击“测试连接”后，客户端会读取 API 的 `/models` 返回值，把当前账号有权限的模型同步到设置页，因此可以在同一个客户端切换多个有权限的付费模型，也可以填写自定义网关和模型 ID。实际可用模型仍由 API 账号权限和服务端返回结果决定。
+- **直接接入 API**：本地端使用自己的 DeepSeek API Key。点击“测试连接”后，客户端读取 `/models`，同步当前账号可用的受支持模型；兼容网关可以填写自定义地址和模型 ID。
 - **回答内容在本机排版**：Markdown、代码块、表格、引用和数学公式由本地渲染器处理；KaTeX、样式和数学字体随应用打包，不依赖在线 CDN。
 - **Chat 与 Harness 集成在一个窗口**：顶部 `Work Type` 选择器可以在原生 Chat 和官方 Harness Web UI 之间切换。两种工作流共用应用设置、品牌和运行环境，不需要来回打开不同应用。
 - **对话和媒体留在本机**：历史记录、发送过的图片、主题和提示词保存在用户数据目录；应用不会把本地历史同步到额外的第三方服务。
@@ -60,6 +60,13 @@
 ## 功能
 
 ### Chat
+
+| 模型 ID | 服务模型 | 输入 | 上下文 | 最大输出 |
+| --- | --- | --- | --- | --- |
+| `deepseek-flash` | DeepSeek V4.1 Flash 1017 | 文本、图片 | 1,048,576 tokens | 393,216 tokens |
+| `deepseek-v4-pro` | DeepSeek V4 Pro 0813 | 文本 | 1,048,576 tokens | 393,216 tokens |
+
+API 地址为 `https://api.deepseek.com`，对话使用 `/chat/completions`。思考模式通过 `thinking.type` 控制，强度使用 `reasoning_effort`；启用工具时，历史 `reasoning_content` 会完整回传。最大输出设为 0 时使用服务端默认值：标准模式 8K、思考模式 64K、`max` 强度 128K。接口定义见 [DeepSeek 官方文档](https://api-docs.deepseek.com/api/create-chat-completion/)。
 
 - DeepSeek API 流式输出和深度思考
 - `low`、`high`、`max` 三档思考强度
@@ -97,9 +104,10 @@
 
 ## 从源码运行
 
-需要 macOS、Python 3.11+、Qt WebEngine 和一个可用的 DeepSeek API Key。项目不要求全局安装依赖，建议使用已有的 Conda 环境：
+需要 macOS 14+、Python 3.12、Qt WebEngine 和一个可用的 DeepSeek API Key。使用项目专用 Conda 环境：
 
 ```bash
+conda create -n deepseek-chat python=3.12 pip
 conda activate deepseek-chat
 python -m pip install -r requirements.txt
 python main.py
@@ -137,7 +145,7 @@ conda activate deepseek-chat
 QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ```
 
-覆盖请求参数、流式响应、图片消息、模型同步与迁移、Markdown/LaTeX 边界、代码复制、公式溢出、对话存储、思考折叠、Chat/Harness 模式切换、设置页和本地运行时状态。
+覆盖请求参数、流式响应、图片消息、模型目录、工具调用的思考回传、Markdown/LaTeX 边界、代码复制、公式溢出、对话存储、思考折叠、Chat/Harness 模式切换、设置页和本地运行时状态。
 
 ## 打包 macOS DMG
 
@@ -159,17 +167,19 @@ release/DeepSeek-<版本>-macos-<架构>.dmg
 
 ## 发布
 
-版本号位于 `app/__init__.py`。保持版本号为 `1.0.0` 时，完整流程为：
+版本号位于 `app/__init__.py`，Release 说明使用 `update.md`：
 
 ```bash
+conda activate deepseek-chat
+python -m pip install -r requirements-dev.txt
+python -m pip check
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ./scripts/package_macos.sh
-git add .
-git commit -m "Release DeepSeek 1.0.0"
 git push origin main
 ./scripts/release_github.sh
 ```
 
-`scripts/release_github.sh` 会读取 `update.md` 作为 Release 说明，并上传对应架构的 DMG。覆盖已有 `v1.0.0` 时，需要先确认远端标签和 Release 资产，再按发布脚本执行覆盖操作。
+发布前提交已验证的源码和版本配置。`scripts/release_github.sh` 上传对应架构的 DMG，并同步当前版本的说明；同一版本再次执行时会替换同名安装包与页面说明。
 
 ## 兼容性与已知提示
 
@@ -186,7 +196,7 @@ deepseek-chat-gui/
 ├── main.py
 ├── app/
 │   ├── api.py              API 请求、模型同步和消息载荷
-│   ├── config.py           配置、模型能力和迁移
+│   ├── config.py           配置与模型能力
 │   ├── harness.py          Harness 进程、端口和运行时管理
 │   ├── markdown.py         Markdown 与 KaTeX HTML
 │   ├── storage.py          对话和媒体存储
@@ -197,6 +207,6 @@ deepseek-chat-gui/
 ├── scripts/                Harness 供应、DMG 构建和 GitHub 发布
 ├── tests/                  API、渲染、配置、存储和 UI 回归测试
 ├── DeepSeekChat.spec       PyInstaller 配置
-├── update.md               v1.0.0 发布说明
+├── update.md               当前版本说明
 └── requirements*.txt       运行与开发依赖
 ```

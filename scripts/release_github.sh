@@ -16,7 +16,7 @@ if [ -z "$REMOTE_URL" ]; then
   exit 1
 fi
 
-VERSION="$("${DEEPSEEK_PYTHON:-python3}" - "$ROOT_DIR" <<'PY'
+VERSION="$("${DEEPSEEK_PYTHON:-/opt/anaconda3/envs/deepseek-chat/bin/python}" - "$ROOT_DIR" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 from app import __version__
@@ -36,7 +36,18 @@ if [ ! -f "$NOTES_FILE" ]; then
   exit 1
 fi
 
-echo ">> Creating GitHub release ${TAG} for ${REMOTE_URL}"
-gh release create "$TAG" "$DMG" \
-  --title "DeepSeek ${VERSION}" \
-  --notes-file "$NOTES_FILE"
+if gh release view "$TAG" >/dev/null 2>&1; then
+  echo ">> Publishing ${TAG} for ${REMOTE_URL}"
+  gh release upload "$TAG" "$DMG" --clobber
+  gh release edit "$TAG" \
+    --title "DeepSeek ${VERSION}" \
+    --notes-file "$NOTES_FILE" \
+    --latest
+else
+  echo ">> Publishing ${TAG} for ${REMOTE_URL}"
+  gh release create "$TAG" "$DMG" \
+    --target "$(git rev-parse HEAD)" \
+    --title "DeepSeek ${VERSION}" \
+    --notes-file "$NOTES_FILE" \
+    --latest
+fi

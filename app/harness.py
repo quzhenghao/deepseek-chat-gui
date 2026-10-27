@@ -19,6 +19,8 @@ from .config import (
     APP_DIR,
     DEFAULT_BASE_URL,
     DEFAULT_MODELS,
+    MAX_CONTEXT_TOKENS,
+    MAX_OUTPUT_TOKENS,
     MODEL_CAPABILITIES,
     MODEL_LABELS,
 )
@@ -135,10 +137,14 @@ def _harness_model_entries() -> str:
         entries.append(
             f"    - id: {model}\n"
             f"      name: {MODEL_LABELS.get(model, model)}\n"
-            "      contextWindow: 1000000\n"
-            "      maxTokens: 256000\n"
+            f"      contextWindow: {MAX_CONTEXT_TOKENS}\n"
+            f"      maxTokens: {MAX_OUTPUT_TOKENS}\n"
             f"      inputModalities: [{modalities}]\n"
-            "      systemPromptUpdate: in-history\n"
+            + (
+                "      systemPromptUpdate: in-history\n"
+                if capabilities.get("system_prompt_update") == "in-history"
+                else ""
+            )
         )
     return "".join(entries)
 
@@ -159,7 +165,7 @@ def ensure_harness_defaults(home: Path, cfg: dict) -> Path:
         f"  baseURL: {_yaml_string(base_url)}\n"
         "  thinking: enabled\n"
         "  reasoningEffort: high\n"
-        "  maxTokens: 256000\n"
+        f"  maxTokens: {MAX_OUTPUT_TOKENS}\n"
         "  models:\n"
         + _harness_model_entries(),
         encoding="utf-8",

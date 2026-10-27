@@ -38,11 +38,11 @@ class ConfigTests(unittest.TestCase):
         unknown = config._sanitize({**config.DEFAULTS, "search_provider": "bing"})
         self.assertEqual(unknown["search_provider"], "duckduckgo")
 
-    def test_legacy_model_names_are_migrated(self) -> None:
+    def test_current_model_labels_are_normalized(self) -> None:
         cleaned = config._sanitize(
             {
                 **config.DEFAULTS,
-                "models": ["DeepSeek-V4-Flash", "DeepSeek V4 Pro"],
+                "models": ["DeepSeek V4.1 Flash", "DeepSeek V4 Pro"],
                 "default_model": "DeepSeek V4 Pro",
                 "last_effort": "Medium",
             }
@@ -51,16 +51,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cleaned["default_model"], "deepseek-v4-pro")
         self.assertEqual(cleaned["last_effort"], "high")
 
-    def test_official_legacy_base_url_is_normalized(self) -> None:
-        cleaned = config._sanitize({**config.DEFAULTS, "base_url": "https://api.deepseek.com/v1"})
-        self.assertEqual(cleaned["base_url"], "https://api.deepseek.com")
+    def test_official_base_urls_are_normalized(self) -> None:
+        for suffix in ("/v1", "/v1/chat/completions", "/chat/completions/"):
+            cleaned = config._sanitize(
+                {**config.DEFAULTS, "base_url": "https://api.deepseek.com" + suffix}
+            )
+            self.assertEqual(cleaned["base_url"], "https://api.deepseek.com")
 
     def test_existing_official_config_migrates_to_current_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.json"
             config_path.write_text(
-                '{"models":["deepseek-v4-flash","deepseek-v4-pro"],'
+                '{"models":["unavailable-model","deepseek-v4-pro"],'
                 '"default_model":"deepseek-v4-pro"}',
                 encoding="utf-8",
             )
@@ -71,7 +74,7 @@ class ConfigTests(unittest.TestCase):
                 loaded = config.load_config()
         self.assertEqual(
             loaded["models"],
-            ["deepseek-flash", "deepseek-v4-pro"],
+            ["deepseek-v4-pro", "deepseek-flash"],
         )
         self.assertEqual(
             loaded["model_catalog_version"], config.MODEL_CATALOG_VERSION
@@ -115,11 +118,47 @@ class ConfigTests(unittest.TestCase):
 
     def test_official_model_catalog_resolves_current_routes(self) -> None:
         merged = config.normalize_official_models(
-            ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-flash"]
+            ["unavailable-model", "DeepSeek V4.1 Flash", "deepseek-v4-pro", "deepseek-flash"]
         )
         self.assertEqual(merged, ["deepseek-flash", "deepseek-v4-pro"])
         self.assertTrue(config.uses_official_api("https://api.deepseek.com/v1"))
         self.assertFalse(config.uses_official_api("https://example.com/v1"))
+
+    def test_official_catalog_removes_unsupported_models_and_selections(self) -> None:
+        cleaned = config.sanitize_config(
+            {
+                **config.DEFAULTS,
+                "models": ["unavailable-model", "deepseek-v4-pro"],
+                "default_model": "unavailable-model",
+                "last_model": "unavailable-model",
+            }
+        )
+        self.assertEqual(cleaned["models"], ["deepseek-v4-pro"])
+        self.assertEqual(cleaned["default_model"], "deepseek-v4-pro")
+        self.assertEqual(cleaned["last_model"], "deepseek-v4-pro")
+        cleaned = config.sanitize_config(
+            {**config.DEFAULTS, "models": ["unavailable-model"]}
+        )
+        self.assertEqual(cleaned["models"], config.DEFAULT_MODELS)
+
+    def test_custom_gateway_keeps_its_own_models(self) -> None:
+        cleaned = config.sanitize_config(
+            {
+                **config.DEFAULTS,
+                "base_url": "https://example.com/v1",
+                "models": ["gateway-model"],
+                "default_model": "gateway-model",
+            }
+        )
+        self.assertEqual(cleaned["models"], ["gateway-model"])
+        self.assertEqual(cleaned["default_model"], "gateway-model")
+
+    def test_max_output_uses_the_official_limit(self) -> None:
+        for requested, expected in ((393216, 393216), (999999, 393216), (-1, 0)):
+            cleaned = config.sanitize_config(
+                {**config.DEFAULTS, "max_tokens": requested}
+            )
+            self.assertEqual(cleaned["max_tokens"], expected)
 
     def test_harness_defaults_are_created_once_and_use_current_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -137,6 +176,11 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("inputModalities: [text, image]", first)
             self.assertIn("id: deepseek-v4-pro", first)
             self.assertIn("inputModalities: [text]", first)
+            self.assertEqual(first.count("contextWindow: 1048576"), 2)
+            self.assertEqual(first.count("maxTokens: 393216"), 3)
+            self.assertIn("systemPromptUpdate: in-history", first)
+            pro_entry = first.split("id: deepseek-v4-pro", 1)[1]
+            self.assertNotIn("systemPromptUpdate", pro_entry)
 
 
 class StorageTests(unittest.TestCase):

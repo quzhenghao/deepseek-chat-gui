@@ -135,7 +135,7 @@ class APITests(unittest.TestCase):
         response.json.return_value = {
             "data": [
                 {"id": "deepseek-v4-pro"},
-                {"id": "deepseek-v4-flash"},
+                {"id": "unavailable-model"},
                 {"id": "deepseek-flash"},
             ]
         }
@@ -144,6 +144,23 @@ class APITests(unittest.TestCase):
                 {"api_key": "test", "base_url": "https://api.deepseek.com"}
             )
         self.assertEqual(models, ["deepseek-v4-pro", "deepseek-flash"])
+
+    def test_model_listing_rejects_invalid_response_shapes(self) -> None:
+        for payload in ([], {}, {"data": None}, {"data": "invalid"}):
+            response = Mock(status_code=200)
+            response.json.return_value = payload
+            with (
+                patch("app.api.requests.get", return_value=response),
+                self.assertRaises(api.APIError),
+            ):
+                api.list_models({"api_key": "test"})
+
+    def test_max_output_stays_within_the_official_limit(self) -> None:
+        for model in DEFAULT_MODELS:
+            body = api.build_chat_body(model, "high", True, [], 1.0, 393216)
+            self.assertEqual(body["max_tokens"], 393216)
+            body = api.build_chat_body(model, "max", True, [], 1.0, 999999)
+            self.assertEqual(body["max_tokens"], 393216)
 
     def test_thinking_body_uses_effort_without_temperature(self) -> None:
         body = api.build_chat_body(
@@ -171,6 +188,23 @@ class APITests(unittest.TestCase):
         parts = payload[0]["content"]
         self.assertEqual(parts[0], {"type": "text", "text": "看图"})
         self.assertTrue(parts[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_tool_requests_preserve_reasoning_from_every_assistant_turn(self) -> None:
+        history = [
+            {"role": "user", "content": "第一问"},
+            {"role": "assistant", "content": "答案", "reasoning_content": "  思考\n"},
+            {"role": "user", "content": "第二问"},
+            {"role": "assistant", "content": "直接回答"},
+            {"role": "user", "content": "请搜索"},
+        ]
+        messages = api.payload_messages(history)
+        body = api.build_chat_body(
+            "deepseek-flash", "high", True, messages, 1.0, 0, web_search=True
+        )
+        self.assertEqual(body["messages"][1]["reasoning_content"], "  思考\n")
+        self.assertEqual(body["messages"][3]["reasoning_content"], "")
+        messages.append({"role": "user", "content": "后续消息"})
+        self.assertEqual(len(body["messages"]), 5)
 
     def test_stream_separates_reasoning_and_content(self) -> None:
         lines = [
@@ -286,7 +320,7 @@ class APITests(unittest.TestCase):
         phase_one = ResponseContext(
             [
                 sse(
-                    {"choices": [{"delta": {"reasoning_content": "先查一下"}}]}
+                    {"choices": [{"delta": {"reasoning_content": "  先查一下\n"}}]}
                 ),
                 sse(
                     {
@@ -361,7 +395,7 @@ class APITests(unittest.TestCase):
         self.assertEqual(
             result,
             [
-                ("reasoning", "先查一下"),
+                ("reasoning", "  先查一下\n"),
                 ("search", "正在联网搜索…"),
                 ("search", "已获取 1 条结果，正在生成回答…"),
                 ("content", "已发布，见 [1]。"),
@@ -381,6 +415,9 @@ class APITests(unittest.TestCase):
         )
         self.assertEqual(
             second_body["messages"][-2]["tool_calls"][0]["id"], "call_1"
+        )
+        self.assertEqual(
+            second_body["messages"][-2]["reasoning_content"], "  先查一下\n"
         )
         self.assertEqual(
             second_body["messages"][-1]["tool_call_id"], "call_1"
@@ -446,6 +483,22 @@ class APITests(unittest.TestCase):
 
         self.assertNotIn(("content", "我先搜索一下。"), result)
         self.assertEqual(result[-1], ("content", "最终答案"))
+
+    def test_search_stream_surfaces_api_errors(self) -> None:
+        response = ResponseContext(
+            ['data: {"error":{"message":"request rejected"}}', "data: [DONE]"]
+        )
+        with (
+            patch("app.api.requests.post", return_value=response),
+            self.assertRaisesRegex(api.APIError, "request rejected"),
+        ):
+            list(
+                api.stream_chat(
+                    {"api_key": "test"}, "deepseek-flash", "high", True,
+                    [{"role": "user", "content": "搜索"}], 1.0, 0,
+                    threading.Event(), web_search=True,
+                )
+            )
 
     def test_zenith_tool_blocks_are_stripped_from_prose(self) -> None:
         raw = (

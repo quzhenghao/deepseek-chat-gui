@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
-from .config import normalize_official_models, uses_official_api
+from .config import MAX_OUTPUT_TOKENS, normalize_official_models, uses_official_api
 
 
 SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -182,7 +182,10 @@ def payload_messages(history: list[dict]) -> list[dict]:
                 parts.append({"type": "text", "text": "请查看图片。"})
             result.append({"role": role, "content": parts})
         else:
-            result.append({"role": role, "content": content})
+            item = {"role": role, "content": content}
+            if role == "assistant":
+                item["reasoning_content"] = message.get("reasoning_content") or ""
+            result.append(item)
     return result
 
 
@@ -282,8 +285,14 @@ def build_chat_body(
     else:
         body["temperature"] = temperature
     if max_tokens > 0:
-        body["max_tokens"] = max_tokens
+        body["max_tokens"] = min(max_tokens, MAX_OUTPUT_TOKENS)
     if web_search:
+        body["messages"] = [
+            {**message, "reasoning_content": message.get("reasoning_content") or ""}
+            if message.get("role") == "assistant"
+            else message
+            for message in messages
+        ]
         body["tools"] = SEARCH_TOOLS
         body["tool_choice"] = (
             tool_choice
@@ -690,6 +699,8 @@ def list_models(cfg: dict, timeout: tuple[int, int] = (5, 15)) -> list[str]:
         raise APIError(_response_error(response))
     try:
         data = response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise APIError("模型列表响应格式无效")
         models = [
             str(item["id"])
             for item in data.get("data", [])
@@ -858,18 +869,17 @@ def stream_search_function(
             for payload in _iter_chat_payloads(response, stop):
                 if stop.is_set():
                     return
+                if payload.get("error"):
+                    _extract_parts(payload)
                 for choice in payload.get("choices") or []:
                     delta = choice.get("delta") or choice.get("message") or {}
-                    reasoning = _strip_zenith(
-                        str(
-                            delta.get("reasoning_content")
-                            or delta.get("reasoning")
-                            or ""
-                        )
+                    raw_reasoning = str(
+                        delta.get("reasoning_content") or delta.get("reasoning") or ""
                     )
+                    round_reasoning.append(raw_reasoning)
+                    reasoning = _strip_zenith(raw_reasoning)
                     content = _strip_zenith(str(delta.get("content") or ""))
                     if reasoning:
-                        round_reasoning.append(reasoning)
                         yield ("reasoning", reasoning)
                     if content:
                         round_content.append(content)
@@ -942,7 +952,7 @@ def stream_search_function(
             {
                 "role": "assistant",
                 "content": "".join(round_content).strip() or None,
-                "reasoning_content": "".join(round_reasoning).strip() or None,
+                "reasoning_content": "".join(round_reasoning),
                 "tool_calls": [
                     {
                         "id": tool_calls[index]["id"] or f"call_{index}",

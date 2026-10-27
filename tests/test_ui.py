@@ -200,6 +200,17 @@ class UITests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         cls.app.setQuitOnLastWindowClosed(False)
 
+    def tearDown(self) -> None:
+        for widget in self.app.topLevelWidgets():
+            if widget.parentWidget() is not None:
+                continue
+            if isinstance(widget, (ChatView, HarnessSurface, _MathWebView)):
+                widget.dispose()
+            widget.close()
+            widget.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
+
     def wait_for(self, predicate, timeout_ms: int = 5000) -> bool:
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:

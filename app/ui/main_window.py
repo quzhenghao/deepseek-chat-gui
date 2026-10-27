@@ -268,7 +268,7 @@ class InputPanel(QWidget):
         self.search_button.setCheckable(True)
         self.search_button.setChecked(web_search)
         self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_button.setToolTip("使用DeepSeek_Responses_API联网搜索")
+        self.search_button.setToolTip("通过工具调用执行联网搜索")
         self.search_button.toggled.connect(self._web_search_toggled)
         toolbar.addWidget(self.search_button)
 
