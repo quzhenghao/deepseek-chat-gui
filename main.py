@@ -13,7 +13,6 @@ from app.storage import ConversationStore
 from app.ui.main_window import MainWindow
 from app.ui.theme import build_qss
 
-
 def main() -> int:
     install_crash_logging()
     QApplication.setApplicationName("DeepSeek")
@@ -28,7 +27,6 @@ def main() -> int:
     window = MainWindow(config, ConversationStore(), app)
     window.show()
     return app.exec()
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

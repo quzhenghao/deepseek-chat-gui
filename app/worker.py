@@ -6,7 +6,6 @@ from PySide6.QtCore import QThread, Signal
 
 from . import api
 
-
 class ChatWorker(QThread):
     chunk = Signal(str)
     reasoning = Signal(str)
@@ -91,7 +90,6 @@ class ChatWorker(QThread):
                 self.done.emit()
             else:
                 self.failed.emit(f"请求异常：{exc}")
-
 
 class TitleWorker(QThread):
     titleReady = Signal(str)

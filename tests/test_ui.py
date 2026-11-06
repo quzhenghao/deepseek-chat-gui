@@ -23,6 +23,7 @@ from PySide6.QtWebEngineCore import QWebEngineProfile
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QLineEdit,
     QMenu,
     QPushButton,
     QTextBrowser,
@@ -85,10 +86,7 @@ from app.ui.theme import (
     colors,
 )
 
-
 class FakeMenuEvent:
-    """Minimal stand-in for the context-menu events the widgets receive."""
-
     def __init__(self, pos: QPoint | None = None) -> None:
         self._pos = QPoint(4, 4) if pos is None else pos
 
@@ -97,7 +95,6 @@ class FakeMenuEvent:
 
     def globalPos(self) -> QPoint:
         return QPoint(0, 0)
-
 
 class MemoryStore:
     def __init__(self) -> None:
@@ -148,7 +145,6 @@ class MemoryStore:
         self._items = [
             item for item in self._items if item["id"] not in identifiers
         ]
-
 
 class UITests(unittest.TestCase):
     SURFACE_METRICS_SCRIPT = """
@@ -228,8 +224,6 @@ class UITests(unittest.TestCase):
         return result[0]
 
     def message_tiles(self, bubble) -> list[_MathWebView]:
-        """Wait until a bubble painted its Chromium tiles and return them."""
-
         self.assertTrue(
             self.wait_for(
                 lambda: bubble.content_view.tile_count > 0
@@ -244,8 +238,6 @@ class UITests(unittest.TestCase):
         return list(bubble.content_view._tiles)
 
     def surface_metrics(self, tile) -> dict:
-        """Read the shared surface probe out of one Chromium tile."""
-
         return json.loads(
             self.javascript_value(tile.page(), self.SURFACE_METRICS_SCRIPT)
         )
@@ -368,8 +360,6 @@ class UITests(unittest.TestCase):
         view.close()
 
     def test_streaming_buffer_is_revealed_from_the_cache(self) -> None:
-        """Model output is buffered first and then read back out on screen."""
-
         view = ChatView()
         view.resize(900, 500)
         view.show()
@@ -1063,11 +1053,11 @@ class UITests(unittest.TestCase):
         menu.addAction("删除")
         self.assertEqual(menu.minimumWidth(), 104)
         self.assertIn("border-radius: 12px", menu.styleSheet())
-        self.assertIn("background: #EEEEEE", menu.styleSheet())
+        self.assertIn(f"background: {colors('light')['accent_soft']}", menu.styleSheet())
         self.assertIn("padding: 7px 10px", menu.styleSheet())
 
         menu.set_theme("dark")
-        self.assertIn("background: #353535", menu.styleSheet())
+        self.assertIn(f"background: {colors('dark')['accent_soft']}", menu.styleSheet())
         menu.resize(150, 100)
         menu.show()
         self.app.processEvents()
@@ -1108,14 +1098,15 @@ class UITests(unittest.TestCase):
             .split("}", 1)[0]
         )
         self.assertIn("background: #FFFFFF;", dialog_surface)
-        self.assertIn("border: 1px solid #D4D6D9;", dialog_surface)
+        self.assertIn(f"border: 1px solid {colors('light')['border_strong']};", dialog_surface)
         self.assertNotIn("border-radius", dialog_surface)
         self.assertEqual(dialog.grab().toImage().pixelColor(0, 0).alpha(), 255)
 
         dialog.apply_theme("dark")
         self.app.processEvents()
-        self.assertIn("background: #222222;", dialog.styleSheet())
-        self.assertIn("border: 1px solid #454545;", dialog.styleSheet())
+        dark = colors("dark")
+        self.assertIn(f"background: {dark['panel']};", dialog.styleSheet())
+        self.assertIn(f"border: 1px solid {dark['border_strong']};", dialog.styleSheet())
         self.assertEqual(dialog.grab().toImage().pixelColor(0, 0).alpha(), 255)
         dialog.no_button.click()
         self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
@@ -1717,11 +1708,12 @@ class UITests(unittest.TestCase):
         page = window.settings_page
         self.assertEqual(page.web_search.text(), "默认开启联网搜索")
         self.assertTrue(page.web_search.isChecked())
+        search_info = page.findChildren(QLineEdit, "searchInfo")
         self.assertEqual(
-            [page.search_provider.itemData(i) for i in range(page.search_provider.count())],
-            ["duckduckgo", "tavily"],
+            [field.text() for field in search_info],
+            ["DeepSeek Search / Fetch", "与对话共用 API 密钥"],
         )
-        self.assertEqual(page.search_provider.currentData(), "duckduckgo")
+        self.assertTrue(all(field.isReadOnly() for field in search_info))
         window.close()
 
     def test_message_meta_marks_web_search(self) -> None:
@@ -2337,9 +2329,15 @@ class UITests(unittest.TestCase):
         self.assertEqual(window.settings_page.brand.text(), "DeepSeek")
         self.assertEqual(window.windowTitle(), "DeepSeek")
         self.assertFalse(window.windowIcon().isNull())
-        icon_source = (ASSETS_DIR / "app-icon.svg").read_text(encoding="utf-8")
-        self.assertIn('fill="#171717"', icon_source)
-        self.assertNotIn("#4D6BFE", icon_source)
+        app_icon = QImage(str(ASSETS_DIR / "app-icon.png"))
+        self.assertFalse(app_icon.isNull())
+        samples = {
+            app_icon.pixelColor(x, y).name()
+            for x in range(16, app_icon.width(), 32)
+            for y in range(16, app_icon.height(), 32)
+        }
+        self.assertIn("#171717", samples)
+        self.assertNotIn("#4d6bfe", samples)
         self.assertEqual(palette["side_bg"], "#F3F3F3")
         self.assertNotIn("#4D6BFE", window.mode_selector.styleSheet())
         window.close()
@@ -2911,7 +2909,6 @@ class UITests(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(tip.isVisible())
         window.close()
-
 
 if __name__ == "__main__":
     unittest.main()

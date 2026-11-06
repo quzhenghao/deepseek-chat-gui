@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 _CUSTOM_HOME = os.environ.get("DEEPSEEK_CHAT_GUI_HOME")
 APP_DIR = (
     Path(_CUSTOM_HOME).expanduser()
@@ -34,8 +33,20 @@ _COMPACT_MODEL_LABEL_ALIASES = {
     re.sub(r"\s+", "-", label.lower()): model
     for model, label in MODEL_LABELS.items()
 }
+_LEGACY_FLASH_IDS = {"deepseek-v4-flash", "deepseek-v4-flash-vision-exp"}
 EFFORT_LEVELS = ["low", "high", "max"]
 EFFORT_LABELS = {"low": "Low", "high": "High", "max": "Max"}
+DEFAULT_EFFORT = "high"
+_EFFORT_ALIASES = {
+    "低": "low",
+    "高": "high",
+    "最高": "max",
+    "minimal": "low",
+    "medium": "high",
+    "xhigh": "high",
+    "ultra": "max",
+}
+DEFAULT_SEARCH_MAX_RESULTS = 5
 
 MODEL_CAPABILITIES = {
     V41_FLASH_MODEL: {
@@ -59,13 +70,11 @@ DEFAULTS: dict[str, Any] = {
     "models": list(DEFAULT_MODELS),
     "default_model": DEFAULT_MODELS[0],
     "last_model": DEFAULT_MODELS[0],
-    "default_effort": "high",
-    "last_effort": "high",
+    "default_effort": DEFAULT_EFFORT,
+    "last_effort": DEFAULT_EFFORT,
     "deep_thinking": True,
     "web_search": True,
-    "search_provider": "duckduckgo",
-    "search_api_key": "",
-    "search_max_results": 5,
+    "search_max_results": DEFAULT_SEARCH_MAX_RESULTS,
     "temperature": 1.0,
     "max_tokens": 0,
     "theme": "light",
@@ -74,113 +83,91 @@ DEFAULTS: dict[str, Any] = {
     "harness_warm_start": True,
 }
 
-
 def ensure_dir() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
-
 
 def model_label(model: str) -> str:
     return MODEL_LABELS.get(model, model)
 
-
 def effort_label(effort: str) -> str:
     value = str(effort or "").strip()
-    aliases = {
-        "低": "low",
-        "高": "high",
-        "最高": "max",
-        "medium": "high",
-        "xhigh": "high",
-    }
-    normalized = aliases.get(value.lower(), value.lower())
-    return EFFORT_LABELS.get(normalized, value or "High")
-
+    normalized = _EFFORT_ALIASES.get(value.lower(), value.lower())
+    return EFFORT_LABELS.get(normalized, value or EFFORT_LABELS[DEFAULT_EFFORT])
 
 def is_vision_model(model: str) -> bool:
     known = MODEL_CAPABILITIES.get(model or "")
     return bool(known["vision"]) if known else "vision" in (model or "").lower()
 
-
 def supports_thinking(model: str) -> bool:
     known = MODEL_CAPABILITIES.get(model or "")
     return bool(known["thinking"]) if known else True
-
 
 def uses_official_api(base_url: Any) -> bool:
     value = str(base_url or DEFAULT_BASE_URL).strip().rstrip("/")
     return value in {DEFAULT_BASE_URL, f"{DEFAULT_BASE_URL}/v1"}
 
-
 def normalize_official_models(models: Any) -> list[str]:
-    """Return supported models present in the official catalog, without duplicates."""
-
+    # Keep catalog order while collapsing aliases.
     if isinstance(models, str):
         source = models.splitlines()
     else:
         source = models or []
     merged: list[str] = []
     for item in source:
-        model = _normalize_model(item)
+        model = _normalize_model(item, official=True)
         if model in DEFAULT_MODELS and model not in merged:
             merged.append(model)
     return merged
 
-
-def _normalize_model(model: Any) -> str:
+def _normalize_model(model: Any, *, official: bool = False) -> str:
     value = str(model or "").strip()
     lowered = value.lower().replace("_", "-")
     if lowered in DEFAULT_MODELS:
         return lowered
+    if official and lowered in _LEGACY_FLASH_IDS:
+        return V41_FLASH_MODEL
     compacted = re.sub(r"\s+", "-", lowered)
-    if compacted in _COMPACT_MODEL_LABEL_ALIASES:
-        return _COMPACT_MODEL_LABEL_ALIASES[compacted]
-    return value
+    return _COMPACT_MODEL_LABEL_ALIASES.get(compacted, value)
 
+def normalize_effort(value: Any) -> str:
+    effort = str(value or "").strip().lower()
+    effort = _EFFORT_ALIASES.get(effort, effort)
+    return effort if effort in EFFORT_LEVELS else DEFAULT_EFFORT
 
-def _normalize_effort(value: Any) -> str:
-    effort = str(value or "high").strip().lower()
-    return effort if effort in EFFORT_LEVELS else "high"
-
+def search_result_count(value: Any) -> int:
+    try:
+        return min(10, max(1, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SEARCH_MAX_RESULTS
 
 def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
     base_url = str(cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
     if base_url.endswith("/chat/completions"):
         base_url = base_url[: -len("/chat/completions")]
-    if uses_official_api(base_url):
-        base_url = DEFAULT_BASE_URL
-    cfg["base_url"] = base_url
+    official = uses_official_api(base_url)
+    cfg["base_url"] = DEFAULT_BASE_URL if official else base_url
 
     raw_models = cfg.get("models") or []
     if isinstance(raw_models, str):
         raw_models = raw_models.splitlines()
-    models: list[str] = []
-    for item in raw_models:
-        model = _normalize_model(item)
-        if model and model not in models:
-            models.append(model)
-    if uses_official_api(base_url):
-        models = normalize_official_models(models)
+    if official:
+        models = normalize_official_models(raw_models)
+    else:
+        normalized_models = map(_normalize_model, raw_models)
+        models = list(dict.fromkeys(model for model in normalized_models if model))
     cfg["models"] = models or list(DEFAULT_MODELS)
 
-    default_model = _normalize_model(cfg.get("default_model"))
-    last_model = _normalize_model(cfg.get("last_model"))
+    default_model = _normalize_model(cfg.get("default_model"), official=official)
+    last_model = _normalize_model(cfg.get("last_model"), official=official)
     cfg["default_model"] = default_model if default_model in cfg["models"] else cfg["models"][0]
     cfg["last_model"] = last_model if last_model in cfg["models"] else cfg["default_model"]
-    cfg["default_effort"] = _normalize_effort(cfg.get("default_effort"))
-    cfg["last_effort"] = _normalize_effort(cfg.get("last_effort"))
+    cfg["default_effort"] = normalize_effort(cfg.get("default_effort"))
+    cfg["last_effort"] = normalize_effort(cfg.get("last_effort"))
     cfg["deep_thinking"] = bool(cfg.get("deep_thinking", True))
     cfg["web_search"] = bool(cfg.get("web_search", True))
-    search_provider = str(cfg.get("search_provider") or "duckduckgo").strip().lower()
-    cfg["search_provider"] = (
-        search_provider if search_provider in {"duckduckgo", "tavily"} else "duckduckgo"
-    )
-    cfg["search_api_key"] = str(cfg.get("search_api_key") or "").strip()
-    try:
-        cfg["search_max_results"] = min(
-            10, max(1, int(cfg.get("search_max_results", 5)))
-        )
-    except (TypeError, ValueError):
-        cfg["search_max_results"] = 5
+    cfg.pop("search_provider", None)
+    cfg.pop("search_api_key", None)
+    cfg["search_max_results"] = search_result_count(cfg.get("search_max_results"))
 
     try:
         cfg["temperature"] = min(2.0, max(0.0, float(cfg.get("temperature", 1.0))))
@@ -205,7 +192,6 @@ def _sanitize(cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["harness_warm_start"] = bool(cfg.get("harness_warm_start", True))
     cfg["model_catalog_version"] = MODEL_CATALOG_VERSION
     return cfg
-
 
 def load_config() -> dict[str, Any]:
     ensure_dir()
@@ -236,12 +222,8 @@ def load_config() -> dict[str, Any]:
             pass
     return _sanitize(cfg)
 
-
 def sanitize_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Return an in-memory config normalized to the current app catalog."""
-
     return _sanitize(dict(cfg))
-
 
 def save_config(cfg: dict[str, Any]) -> None:
     ensure_dir()

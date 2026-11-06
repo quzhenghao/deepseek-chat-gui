@@ -34,7 +34,7 @@ fi
 "$PYTHON_BIN" -m PyInstaller --clean --noconfirm \
   --workpath "$BUILD_DIR" --distpath "$DIST_DIR" "$SPEC_FILE"
 
-# Restore PySide6's QtWebEngineCore resource layout before staging and re-signing the app.
+# Restore QtWebEngine resources before signing.
 QT_WEBENGINE_FRAMEWORK="$DIST_APP/Contents/Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework"
 QT_WEBENGINE_EXTRA="$QT_WEBENGINE_FRAMEWORK/Versions/Resources"
 if [ -d "$QT_WEBENGINE_EXTRA" ]; then

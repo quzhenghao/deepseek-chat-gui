@@ -1,5 +1,4 @@
-"""Persist otherwise hidden desktop crash and exception details."""
-
+# Write crash and exception logs for desktop launches.
 from __future__ import annotations
 
 import faulthandler
@@ -18,7 +17,6 @@ MAX_LOG_BYTES = 512 * 1024
 
 _handle = None
 
-
 def _trim(path: Path) -> None:
     try:
         if path.exists() and path.stat().st_size > MAX_LOG_BYTES:
@@ -26,10 +24,8 @@ def _trim(path: Path) -> None:
     except OSError:
         pass
 
-
 def _stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 
 def _append(path: Path, text: str) -> None:
     try:
@@ -39,10 +35,7 @@ def _append(path: Path, text: str) -> None:
     except OSError:
         pass
 
-
 def install() -> tuple[Path, Path]:
-    """Route fatal signals and unhandled exceptions into log files."""
-
     global _handle
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _trim(CRASH_LOG)
@@ -71,6 +64,5 @@ def install() -> tuple[Path, Path]:
         args.exc_traceback,
     )
     return CRASH_LOG, ERROR_LOG
-
 
 __all__ = ["CRASH_LOG", "ERROR_LOG", "LOG_DIR", "install"]

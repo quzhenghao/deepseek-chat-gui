@@ -3,8 +3,11 @@ from __future__ import annotations
 import html
 import re
 import sys
+from functools import lru_cache
 
 from markdown_it import MarkdownIt
+
+from .ui.theme import colors
 
 if sys.platform == "darwin":
     _CODE_FONT_STACK = "Menlo, Monaco"
@@ -12,7 +15,6 @@ elif sys.platform == "win32":
     _CODE_FONT_STACK = "Consolas, Courier New, monospace"
 else:
     _CODE_FONT_STACK = "DejaVu Sans Mono, Liberation Mono, monospace"
-
 
 _MARKDOWN = MarkdownIt("commonmark", {"breaks": True, "html": False}).enable("table")
 _MATH_TOKEN_PREFIX = "DEEPSEEKFORMULATOKEN"
@@ -81,7 +83,6 @@ _BARE_DISPLAY_BEGIN_RE = re.compile(
     rf"\\begin\{{({'|'.join(re.escape(name) for name in _BARE_DISPLAY_ENVIRONMENTS)})\}}"
 )
 
-
 def _is_escaped(text: str, position: int) -> bool:
     slashes = 0
     position -= 1
@@ -89,7 +90,6 @@ def _is_escaped(text: str, position: int) -> bool:
         slashes += 1
         position -= 1
     return slashes % 2 == 1
-
 
 def _find_unescaped(
     text: str,
@@ -109,7 +109,6 @@ def _find_unescaped(
             return position
         position += len(delimiter)
 
-
 def _fence_marker(line: str) -> tuple[str, int] | None:
     match = re.match(r" {0,3}(`{3,}|~{3,})", line)
     if not match:
@@ -117,15 +116,12 @@ def _fence_marker(line: str) -> tuple[str, int] | None:
     marker = match.group(1)
     return marker[0], len(marker)
 
-
 def _closing_fence(line: str, marker: tuple[str, int]) -> bool:
     character, minimum = marker
     return bool(re.match(rf" {{0,3}}{re.escape(character)}{{{minimum},}}\s*$", line))
 
-
 def _inline_dollar_end(text: str, start: int) -> int:
-    """Find a conservative CommonMark-friendly closing inline dollar."""
-
+    # Apply Markdown-aware boundaries to inline dollars.
     if start + 1 >= len(text) or text[start + 1].isspace():
         return -1
     position = start + 1
@@ -143,10 +139,8 @@ def _inline_dollar_end(text: str, start: int) -> int:
             return position
         position += 1
 
-
 def _normalize_math(expression: str, display: bool) -> str:
-    """Normalize outer document environments without flattening their layout."""
-
+    # Preserve the layout of outer LaTeX environments.
     normalized = expression.strip()
     if not display:
         return normalized
@@ -179,12 +173,10 @@ def _normalize_math(expression: str, display: bool) -> str:
 
     return re.sub(r"\\label\{[^{}]*\}", "", normalized)
 
-
 def _extract_math(text: str) -> tuple[str, list[tuple[str, str, bool]]]:
-    """Replace formulas outside Markdown code spans/fences with safe tokens."""
-
+    # Keep code spans and fences outside formula extraction.
     if "$" not in text and "\\" not in text:
-        # Without a dollar sign or backslash, no math delimiter can appear.
+        # Skip formula scanning when delimiters are absent.
         return text, []
 
     output: list[str] = []
@@ -284,7 +276,6 @@ def _extract_math(text: str) -> tuple[str, list[tuple[str, str, bool]]]:
 
     return "".join(output), formulas
 
-
 def _formula_html(expression: str, display: bool) -> str:
     attribute = html.escape(expression, quote=True)
     readable = html.escape(expression)
@@ -302,14 +293,13 @@ def _formula_html(expression: str, display: bool) -> str:
         "</span>"
     )
 
-
 def _code_language_label(language: str | None) -> str:
     normalized = str(language or "").strip().lower()
     return _LANGUAGE_LABELS.get(normalized, normalized or "Code")
 
-
 def _decorate_code_blocks(rendered: str) -> str:
-    """Add a copy affordance while retaining Markdown's escaped code source."""
+    if "<pre><code" not in rendered:
+        return rendered
 
     def replace(match: re.Match[str]) -> str:
         language = match.group(1) or ""
@@ -334,20 +324,20 @@ def _decorate_code_blocks(rendered: str) -> str:
 
     return _CODE_BLOCK_RE.sub(replace, rendered)
 
-
+@lru_cache(maxsize=2)
 def _style_html(dark: bool) -> str:
-    """Return the shared stylesheet of every rendered Markdown body."""
-
-    foreground = "#F2F2F2" if dark else "#171717"
-    secondary = "#B7B7B7" if dark else "#5E5E5E"
-    code_background = "#151515" if dark else "#F4F4F4"
-    border = "#3A3A3A" if dark else "#E3E3E3"
-    scroll_track = "#242424" if dark else "#EEEEEE"
-    scroll_thumb = "#858585" if dark else "#8F8F8F"
-    error = "#FF8A8A" if dark else "#B42318"
+    palette = colors("dark" if dark else "light")
+    foreground = palette["fg"]
+    secondary = palette["fg_sub"]
+    code_background = palette["code_bg"]
+    border = palette["border"]
+    scroll_track = palette["reason_bg"]
+    scroll_thumb = palette["fg_muted"]
+    error = palette["danger"]
 
     return f"""
     <style>
+      a {{ color:{palette['link']}; text-decoration:underline; }}
       .markdown-body {{ color:{foreground}; font-size:14px; line-height:1.65;
         overflow-wrap:anywhere; word-break:normal; }}
       .markdown-body p {{ margin:0 0 10px 0; }}
@@ -386,7 +376,6 @@ def _style_html(dark: bool) -> str:
         display:block; max-width:100%; overflow-x:auto; }}
       .markdown-body th, .markdown-body td {{
         border:1px solid {border}; padding:6px 9px; }}
-      .markdown-body a {{ color:{foreground}; text-decoration:underline; }}
       .markdown-body hr {{ border:none; border-top:1px solid {border}; }}
       .markdown-body .math-inline {{ display:inline-block; max-width:100%;
         overflow:visible; vertical-align:-0.18em;
@@ -417,10 +406,7 @@ def _style_html(dark: bool) -> str:
         font-family:{_CODE_FONT_STACK}; }}
     </style>"""
 
-
 def render_body(text: str) -> str:
-    """Render Markdown into the inner HTML of a ``.markdown-body`` block."""
-
     source, formulas = _extract_math(text or "")
     rendered = _MARKDOWN.render(source) if source else ""
     rendered = _decorate_code_blocks(rendered)
@@ -432,19 +418,13 @@ def render_body(text: str) -> str:
 
     return rendered or html.escape(text or "")
 
-
 def to_html(text: str, dark: bool = False) -> str:
-    """Render Markdown to a safe fragment containing KaTeX formula placeholders."""
-
     return (
         _style_html(dark)
         + f'\n    <div class="markdown-body">{render_body(text)}</div>\n    '
     )
 
-
 def _tail_starts_open_fence(source: str) -> bool:
-    """True when the streaming tail is one code fence that is still open."""
-
     lines = source.split("\n")
     index = 0
     while index < len(lines) and not lines[index].strip():
@@ -459,24 +439,18 @@ def _tail_starts_open_fence(source: str) -> bool:
             return False
     return True
 
-
 def _leading_fence_marker(source: str) -> tuple[str, int] | None:
-    """Fence marker of the first non-blank line, when it opens a fence."""
-
     for line in source.split("\n"):
         if not line.strip():
             continue
         return _fence_marker(line)
     return None
 
-
-# Rendered code blocks append raw text into a reserved ``<code>`` element hole.
+# Append streamed code into the open code element.
 _CODE_PLACEHOLDER = "DEEPSEEKSTREAMCODEPLACEHOLDER"
 
-
 def _stable_prefix_length(tail: str) -> int:
-    """Return the final top-level block prefix that later input cannot change."""
-
+    # Freeze top-level blocks that later input cannot change.
     if not tail.strip():
         return 0
     if _tail_starts_open_fence(tail):
@@ -492,10 +466,8 @@ def _stable_prefix_length(tail: str) -> int:
         return 0
     return sum(len(line) + 1 for line in tail.split("\n")[:boundary_line])
 
-
 class StreamingMarkdown:
-    """Append final Markdown blocks while replacing only the live tail."""
-
+    # Keep stable Markdown blocks separate from the live tail.
     def __init__(self, dark: bool = False) -> None:
         self._dark = bool(dark)
         self._source = ""
@@ -527,12 +499,10 @@ class StreamingMarkdown:
 
     @property
     def code_tail_text(self) -> str:
-        """Live last line of an open code fence, as it has to be displayed."""
-
         return self._displayed_code_tail()
 
     def _displayed_code_tail(self) -> str:
-        # Preserve trailing whitespace-only code lines because later indentation must keep them.
+        # Preserve blank lines inside code fences.
         return self._code_tail if self._code_tail.strip() else ""
 
     @property
@@ -559,8 +529,6 @@ class StreamingMarkdown:
         self._revision += 1
 
     def composed_stable_html(self, include_code_tail: bool = True) -> str:
-        """Frozen HTML including the code lines appended since it was drawn."""
-
         code = self._code_text
         if include_code_tail:
             code += self._displayed_code_tail()
@@ -587,8 +555,7 @@ class StreamingMarkdown:
         return self.style_html() + self.body_html()
 
     def update(self, source: str) -> tuple[str, str, str]:
-        """Grow the renderer: ``(stable delta, code delta, tail)`` HTML."""
-
+        # Return stable HTML, code text, and the live tail.
         source = str(source or "")
         if source == self._source:
             return "", "", self._tail_html
@@ -620,8 +587,6 @@ class StreamingMarkdown:
         return html_delta, code_delta, self._tail_html
 
     def _freeze(self, tail: str) -> tuple[str, str, str]:
-        """Freeze what is final and return ``(html, code, remaining tail)``."""
-
         if not tail:
             return "", "", tail
         if self._code_open:
@@ -665,8 +630,6 @@ class StreamingMarkdown:
         markup: str,
         marker: tuple[str, int] | None = None,
     ) -> str:
-        """Render the head of a fence and remember where code lines go."""
-
         rendered = render_body(markup + _CODE_PLACEHOLDER)
         index = rendered.find(_CODE_PLACEHOLDER)
         self._code_open = True
@@ -678,7 +641,7 @@ class StreamingMarkdown:
         return rendered[:index] + rendered[index + len(_CODE_PLACEHOLDER) :]
 
     def _freeze_open_fence(self, tail: str) -> tuple[str, str, str]:
-        # Prepend the first fragment to the active line before finding the fence.
+        # Join the active code line before checking for a fence.
         lines = tail.split("\n")
         if self._code_tail:
             lines = [self._code_tail + lines[0], *lines[1:]]
@@ -692,7 +655,7 @@ class StreamingMarkdown:
                 return "", code, remaining
         complete = lines[:-1]
         if marker is not None and _closing_fence(lines[-1], marker):
-            # A closing marker does not need its own line break to end a fence.
+            # Accept a closing fence without a final newline.
             code = "\n".join(complete) + "\n" if complete else ""
             self._code_open = False
             self._code_tail = ""
@@ -703,8 +666,7 @@ class StreamingMarkdown:
         return "", "\n".join(complete) + "\n", ""
 
     def full_html(self) -> str:
-        """Render the final source once to resolve transient stream splits."""
-
+        # Resolve transient stream splits with one final render.
         return (
             _style_html(self._dark)
             + f'<div class="markdown-body">{render_body(self._source)}</div>'

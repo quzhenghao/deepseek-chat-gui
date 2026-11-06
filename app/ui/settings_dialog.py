@@ -32,6 +32,7 @@ from ..config import (
     APP_DIR,
     effort_label,
     normalize_official_models,
+    normalize_effort,
     model_label,
     uses_official_api,
 )
@@ -65,10 +66,7 @@ from .theme import (
 
 NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
 
-
 class SettingsPage(QWidget):
-    """Full-window settings surface embedded in the main application."""
-
     saveRequested = Signal(dict)
     cancelRequested = Signal()
 
@@ -278,15 +276,16 @@ class SettingsPage(QWidget):
         self.web_search = QCheckBox("默认开启联网搜索")
         generation_form.addRow("联网搜索", self.web_search)
 
-        self.search_provider = RoundedComboBox(self._theme)
-        self.search_provider.addItem("DuckDuckGo(免费，无需密钥)", "duckduckgo")
-        self.search_provider.addItem("Tavily(更稳定，需API-Key)", "tavily")
-        generation_form.addRow("搜索服务商", self.search_provider)
-
-        self.search_api_key = FlatLineEdit()
-        self.search_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.search_api_key.setPlaceholderText("tvly-…")
-        generation_form.addRow("搜索API-Key", self.search_api_key)
+        for label, text in (
+            ("搜索服务", "DeepSeek Search / Fetch"),
+            ("搜索鉴权", "与对话共用 API 密钥"),
+        ):
+            field = FlatLineEdit()
+            field.setObjectName("searchInfo")
+            field.setText(text)
+            field.setReadOnly(True)
+            field.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            generation_form.addRow(label, field)
 
         self.default_effort = RoundedComboBox(self._theme)
         for effort in EFFORT_LEVELS:
@@ -499,13 +498,10 @@ class SettingsPage(QWidget):
         self._fill_models(cfg.get("models", []), cfg.get("default_model", ""))
         self.deep_thinking.setChecked(bool(cfg.get("deep_thinking", True)))
         self.web_search.setChecked(bool(cfg.get("web_search", True)))
-        provider_index = self.search_provider.findData(
-            cfg.get("search_provider", "duckduckgo")
+        effort_index = self.default_effort.findData(
+            normalize_effort(cfg.get("default_effort"))
         )
-        self.search_provider.setCurrentIndex(max(0, provider_index))
-        self.search_api_key.setText(str(cfg.get("search_api_key", "")))
-        effort_index = self.default_effort.findData(cfg.get("default_effort", "high"))
-        self.default_effort.setCurrentIndex(max(0, effort_index))
+        self.default_effort.setCurrentIndex(effort_index)
         self.max_tokens.setValue(int(cfg.get("max_tokens", 0)))
         theme_index = self.theme_combo.findData(cfg.get("theme", "light"))
         self.theme_combo.setCurrentIndex(max(0, theme_index))
@@ -748,8 +744,6 @@ class SettingsPage(QWidget):
             "default_effort": self.default_effort.currentData(),
             "deep_thinking": self.deep_thinking.isChecked(),
             "web_search": self.web_search.isChecked(),
-            "search_provider": self.search_provider.currentData(),
-            "search_api_key": self.search_api_key.text().strip(),
             "max_tokens": self.max_tokens.value(),
             "theme": self.theme_combo.currentData(),
             "system_prompt": self.system_prompt_edit.toPlainText().strip(),
@@ -797,6 +791,5 @@ class SettingsPage(QWidget):
     def cancel_pending_request(self) -> None:
         if self._reply and self._reply.isRunning():
             self._reply.abort()
-
 
 SettingsDialog = SettingsPage

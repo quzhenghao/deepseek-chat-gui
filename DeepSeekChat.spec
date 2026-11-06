@@ -4,7 +4,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(SPECPATH)))
 from app import __version__
 
-
 hiddenimports = [
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",

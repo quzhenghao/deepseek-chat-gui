@@ -32,7 +32,6 @@ from .theme import (
     colors,
 )
 
-
 def _format_time(value: str) -> str:
     try:
         timestamp = datetime.fromisoformat(value)
@@ -45,10 +44,7 @@ def _format_time(value: str) -> str:
         return timestamp.strftime("%m月%d日")
     return timestamp.strftime("%Y年%m月%d日")
 
-
 class _ModeIndexCompat:
-    """Preserve the former mode-combo index API for external callers."""
-
     _DATA = ("chat", "harness")
 
     def __init__(self, owner: "ProductModeSelector") -> None:
@@ -85,10 +81,7 @@ class _ModeIndexCompat:
     def blockSignals(self, blocked: bool) -> None:
         self._blocked = bool(blocked)
 
-
 class ProductModeSelector(QWidget):
-    """The app-wide ``Work Type`` switcher rendered as two rounded buttons."""
-
     modeChanged = Signal(str)
 
     def __init__(
@@ -180,7 +173,6 @@ class ProductModeSelector(QWidget):
         )
         if self.collapse_button is not None:
             apply_icon(self.collapse_button, "sidebar", palette["fg_sub"], 19)
-
 
 class ConversationItem(QWidget):
     selected = Signal(str)
@@ -286,7 +278,6 @@ class ConversationItem(QWidget):
         )
         self.running_indicator.set_theme(theme)
         apply_icon(self.more_button, "more", palette["fg_sub"], 18)
-
 
 class Sidebar(QWidget):
     newChatRequested = Signal()
@@ -435,8 +426,6 @@ class Sidebar(QWidget):
         self.pages.setCurrentWidget(self.full_page)
 
     def _build_rail(self) -> QWidget:
-        """Build the collapsed strip: two entries plus the settings gear."""
-
         rail = QWidget(self.pages)
         rail.setObjectName("sidebarRail")
         rail.setFixedWidth(RAIL_SIDEBAR_WIDTH)
@@ -470,8 +459,6 @@ class Sidebar(QWidget):
         return button
 
     def set_collapsed(self, collapsed: bool) -> None:
-        """Swap between the full navigation page and the icon rail."""
-
         collapsed = bool(collapsed)
         if collapsed == self._collapsed:
             return

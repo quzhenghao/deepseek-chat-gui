@@ -18,12 +18,10 @@ from .controls import build_flat_menu
 from .icons import apply_icon
 from .theme import CHAT_BUBBLE_RADIUS, colors
 
-
 THUMB_SIZE = 62
 MAX_IMAGES = 8
 THUMBNAIL_RADIUS = CHAT_BUBBLE_RADIUS
 THUMBNAIL_BORDER_WIDTH = 1.0
-
 
 def rounded_thumbnail(
     path: str,
@@ -32,8 +30,6 @@ def rounded_thumbnail(
     border_color: str | QColor | None = None,
     background_color: str | QColor | None = None,
 ) -> QPixmap:
-    """Composite one rounded thumbnail and border on the same surface."""
-
     radius = min(float(THUMBNAIL_RADIUS), size / 2)
     image = QImage(path)
     if image.isNull():
@@ -57,7 +53,7 @@ def rounded_thumbnail(
     painter.drawPixmap(0, 0, scaled.copy(left, top, size, size))
 
     if border_color is not None:
-        # Center the one-pixel pen inside the edge so the thumbnail keeps the full stroke.
+        # Keep the stroke inside the thumbnail.
         inset = THUMBNAIL_BORDER_WIDTH / 2
         border_rect = QRectF(
             inset,
@@ -79,7 +75,6 @@ def rounded_thumbnail(
         painter.drawPath(border_path)
     painter.end()
     return result
-
 
 class ThumbView(QLabel):
     removeRequested = Signal(object)
@@ -118,7 +113,7 @@ class ThumbView(QLabel):
                 background_color=palette["canvas"],
             )
         )
-        # The pixmap owns the border, so a transparent QLabel avoids a competing stroke.
+        # Paint the border in the pixmap.
         self.setStyleSheet("background:transparent;border:none;")
 
     def mouseReleaseEvent(self, event) -> None:
@@ -139,7 +134,6 @@ class ThumbView(QLabel):
         elif chosen is remove_action:
             self.removeRequested.emit(self)
 
-
 class ImageStrip(QWidget):
     imagesChanged = Signal(list)
     limitReached = Signal(str)
@@ -152,6 +146,7 @@ class ImageStrip(QWidget):
         self._layout.setContentsMargins(0, 2, 0, 6)
         self._layout.setSpacing(8)
         self._layout.addStretch()
+        self.setStyleSheet("background:transparent;")
         self.hide()
 
     def paths(self) -> list[str]:
@@ -194,8 +189,7 @@ class ImageStrip(QWidget):
         self.imagesChanged.emit(self.paths())
 
     def _refresh_geometry(self) -> None:
-        """Invalidate the whole composer chain after the strip changes size."""
-
+        # Reflow the composer after the image strip changes size.
         self.updateGeometry()
         parent = self.parentWidget()
         while parent is not None:
@@ -207,7 +201,8 @@ class ImageStrip(QWidget):
             parent = parent.parentWidget()
 
     def set_style(self, theme: str) -> None:
+        if theme == self._theme:
+            return
         self._theme = theme
-        self.setStyleSheet("background:transparent;")
         for thumbnail in self._items:
             thumbnail.apply_theme(theme)

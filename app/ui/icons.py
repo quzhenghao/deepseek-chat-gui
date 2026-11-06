@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from math import sqrt
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
-
 
 def _path(points: list[tuple[float, float]], closed: bool = False) -> QPainterPath:
     path = QPainterPath(QPointF(*points[0]))
@@ -14,10 +14,8 @@ def _path(points: list[tuple[float, float]], closed: bool = False) -> QPainterPa
         path.closeSubpath()
     return path
 
-
 def _cog_path(center: float = 12.0) -> QPainterPath:
-    """Regular six-tooth vector cog generated from one repeated profile."""
-
+    # Repeat one profile to draw all six gear teeth.
     tooth = (
         (-3.2, -6.7),
         (-2.0, -9.1),
@@ -43,7 +41,6 @@ def _cog_path(center: float = 12.0) -> QPainterPath:
                 )
             )
     return _path(points, True)
-
 
 def _paint(painter: QPainter, name: str, color: QColor) -> None:
     pen = QPen(
@@ -177,7 +174,7 @@ def _paint(painter: QPainter, name: str, color: QColor) -> None:
         painter.setBrush(color)
         painter.drawEllipse(QPointF(12, 19), 1.25, 1.25)
 
-
+@lru_cache(maxsize=128)
 def icon(name: str, color: str = "#5E5E5E", size: int = 20) -> QIcon:
     density = 3
     pixmap = QPixmap(size * density, size * density)
@@ -192,15 +189,11 @@ def icon(name: str, color: str = "#5E5E5E", size: int = 20) -> QIcon:
     result.addPixmap(pixmap, QIcon.Mode.Normal, QIcon.State.Off)
     return result
 
-
 def apply_icon(button, name: str, color: str, size: int = 20) -> None:
     button.setIcon(icon(name, color, size))
     button.setIconSize(QSize(size, size))
 
-
 def tint_pixmap(pixmap: QPixmap, color: str) -> QPixmap:
-    """Apply a solid brand color while preserving the source alpha channel."""
-
     tinted = QPixmap(pixmap)
     if tinted.isNull():
         return tinted

@@ -9,7 +9,6 @@ from app import config
 from app.harness import ensure_harness_defaults
 from app.storage import ConversationStore
 
-
 class ConfigTests(unittest.TestCase):
     def test_system_prompt_is_preserved_and_trimmed(self) -> None:
         cleaned = config._sanitize(
@@ -22,8 +21,7 @@ class ConfigTests(unittest.TestCase):
         cleaned = config._sanitize({**config.DEFAULTS, "web_search": False})
         self.assertFalse(cleaned["web_search"])
 
-    def test_search_provider_settings_are_sanitized(self) -> None:
-        self.assertEqual(config.DEFAULTS["search_provider"], "duckduckgo")
+    def test_legacy_search_settings_keep_only_the_result_limit(self) -> None:
         cleaned = config._sanitize(
             {
                 **config.DEFAULTS,
@@ -32,11 +30,9 @@ class ConfigTests(unittest.TestCase):
                 "search_max_results": 99,
             }
         )
-        self.assertEqual(cleaned["search_provider"], "tavily")
-        self.assertEqual(cleaned["search_api_key"], "tvly-test")
+        self.assertNotIn("search_provider", cleaned)
+        self.assertNotIn("search_api_key", cleaned)
         self.assertEqual(cleaned["search_max_results"], 10)
-        unknown = config._sanitize({**config.DEFAULTS, "search_provider": "bing"})
-        self.assertEqual(unknown["search_provider"], "duckduckgo")
 
     def test_current_model_labels_are_normalized(self) -> None:
         cleaned = config._sanitize(
@@ -44,12 +40,14 @@ class ConfigTests(unittest.TestCase):
                 **config.DEFAULTS,
                 "models": ["DeepSeek V4.1 Flash", "DeepSeek V4 Pro"],
                 "default_model": "DeepSeek V4 Pro",
-                "last_effort": "Medium",
+                "default_effort": "minimal",
+                "last_effort": "ultra",
             }
         )
         self.assertEqual(cleaned["models"], ["deepseek-flash", "deepseek-v4-pro"])
         self.assertEqual(cleaned["default_model"], "deepseek-v4-pro")
-        self.assertEqual(cleaned["last_effort"], "high")
+        self.assertEqual(cleaned["default_effort"], "low")
+        self.assertEqual(cleaned["last_effort"], "max")
 
     def test_official_base_urls_are_normalized(self) -> None:
         for suffix in ("/v1", "/v1/chat/completions", "/chat/completions/"):
@@ -118,7 +116,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_official_model_catalog_resolves_current_routes(self) -> None:
         merged = config.normalize_official_models(
-            ["unavailable-model", "DeepSeek V4.1 Flash", "deepseek-v4-pro", "deepseek-flash"]
+            ["unavailable-model", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-flash"]
         )
         self.assertEqual(merged, ["deepseek-flash", "deepseek-v4-pro"])
         self.assertTrue(config.uses_official_api("https://api.deepseek.com/v1"))
@@ -182,7 +180,6 @@ class ConfigTests(unittest.TestCase):
             pro_entry = first.split("id: deepseek-v4-pro", 1)[1]
             self.assertNotIn("systemPromptUpdate", pro_entry)
 
-
 class StorageTests(unittest.TestCase):
     def test_automatic_title_does_not_change_conversation_recency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -224,7 +221,6 @@ class StorageTests(unittest.TestCase):
                 store.delete(conversation["id"])
                 self.assertEqual(store.count(), 0)
                 self.assertFalse(imported.parent.exists())
-
 
 if __name__ == "__main__":
     unittest.main()

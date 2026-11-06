@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 from .icons import apply_icon
 from .theme import colors
 
-
 def rounded_surface_qss(
     theme: str, selector: str, padding: str = "6px"
 ) -> str:
@@ -56,7 +55,6 @@ def rounded_surface_qss(
 }}
 """
 
-
 def _apply_rounded_mask(widget: QWidget, radius: float = 12) -> None:
     if widget.width() <= 0 or widget.height() <= 0:
         return
@@ -64,15 +62,12 @@ def _apply_rounded_mask(widget: QWidget, radius: float = 12) -> None:
     path.addRoundedRect(QRectF(widget.rect()), radius, radius)
     widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
-
 def build_flat_menu(parent=None) -> QMenu:
-    """Build an unparented menu so the app paints an opaque flat surface."""
-
+    # Use an unparented menu for an opaque Qt surface.
     menu = QMenu()
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     menu.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
     return menu
-
 
 def show_edit_menu(
     widget: QWidget,
@@ -84,8 +79,6 @@ def show_edit_menu(
     can_paste: bool,
     handlers: dict,
 ) -> None:
-    """Show the standard edit actions on the app's flat menu surface."""
-
     menu = build_flat_menu(widget)
     entries = (
         ("undo", "撤销", undo_available),
@@ -117,10 +110,7 @@ def show_edit_menu(
                 handler()
             return
 
-
 class FlatLineEdit(QLineEdit):
-    """Single-line field whose right-click menu stays a flat panel."""
-
     def contextMenuEvent(self, event) -> None:
         show_edit_menu(
             self,
@@ -140,10 +130,7 @@ class FlatLineEdit(QLineEdit):
             },
         )
 
-
 class FlatPlainTextEdit(QPlainTextEdit):
-    """Multi-line field whose right-click menu stays a flat panel."""
-
     def contextMenuEvent(self, event) -> None:
         cursor = self.textCursor()
         handlers = {
@@ -165,10 +152,7 @@ class FlatPlainTextEdit(QPlainTextEdit):
             handlers=handlers,
         )
 
-
 class FrameAnimator(QObject):
-    """Ramp a float at 60 fps with a smooth ease-in-out curve."""
-
     valueChanged = Signal(float)
     finished = Signal()
 
@@ -210,7 +194,6 @@ class FrameAnimator(QObject):
             self.finished.emit()
             return
         self.valueChanged.emit(value)
-
 
 class RoundedComboBox(QComboBox):
     def __init__(self, theme: str = "light", parent=None) -> None:
@@ -286,10 +269,8 @@ QListView#roundedComboView QScrollBar::sub-line:vertical {{
     def wheelEvent(self, event) -> None:
         event.ignore()
 
-
 class RoundedMenu(QMenu):
-    """Retain the legacy rounded-menu import for external callers."""
-
+    # Keep the rounded menu for compatibility.
     def __init__(self, theme: str = "light", parent=None) -> None:
         super().__init__(parent)
         self._theme = theme
@@ -346,20 +327,15 @@ QMenu#roundedMenu::separator {{
         super().resizeEvent(event)
         self._style_popup()
 
-
 class NoWheelSpinBox(QSpinBox):
     def wheelEvent(self, event) -> None:
         event.ignore()
-
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
     def wheelEvent(self, event) -> None:
         event.ignore()
 
-
 class ConfirmationDialog(QDialog):
-    """Flat, single-surface confirmation for destructive actions."""
-
     def __init__(
         self,
         title: str,
@@ -503,7 +479,6 @@ QPushButton#confirmationYesBtn {{
 """
         )
 
-
 class NoticeDialog(QDialog):
     def __init__(self, text: str, theme: str = "light", parent=None) -> None:
         super().__init__(parent)
@@ -577,7 +552,6 @@ QLabel#noticeMessage {{
         )
         apply_icon(self.close_button, "close", palette["fg_sub"], 16)
 
-
 class HoverTipWidget(QFrame):
     def __init__(self, theme: str = "light") -> None:
         super().__init__(None)
@@ -617,7 +591,6 @@ QLabel#hoverTipMessage {{
 """
         )
 
-
 class HoverTipManager(QObject):
     def __init__(
         self,
@@ -637,8 +610,6 @@ class HoverTipManager(QObject):
         self._watch_timer.timeout.connect(self._refresh_watched_widgets)
 
     def watch(self, root: QWidget) -> None:
-        """Watch tooltipped widgets without filtering Qt WebEngine internals."""
-
         if not any(reference() is root for reference in self._roots):
             self._roots.append(weakref.ref(root))
         self._watch_tree(root)

@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import base64
-import html
 import json
 import mimetypes
 import re
 import threading
 import unicodedata
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Iterator
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import urlparse
 
 import requests
 
-from .config import MAX_OUTPUT_TOKENS, normalize_official_models, uses_official_api
-
+from .config import (
+    DEFAULT_BASE_URL,
+    MAX_OUTPUT_TOKENS,
+    normalize_effort,
+    normalize_official_models,
+    search_result_count,
+    uses_official_api,
+)
 
 SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_INLINE_IMAGE_BYTES = 32 * 1024 * 1024
@@ -40,7 +44,7 @@ SEARCH_TOOL = {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "用于搜索的查询词，尽量具体、一次只搜一个主题。",
+                    "description": "具体的搜索词，最多 128 个字符，每次只搜一个主题。",
                 }
             },
             "required": ["query"],
@@ -56,7 +60,7 @@ _PAGE_TOOL = {
         "name": OPEN_PAGE_TOOL_NAME,
         "description": (
             "打开一个网页 URL 并读取其中的正文内容，用于查看用户指定的具体页面。"
-            "返回页面标题和纯文本内容。"
+            "返回页面标题和 Markdown 正文。"
         ),
         "parameters": {
             "type": "object",
@@ -91,7 +95,7 @@ _SEARCH_RESULT_PROMPT = (
     "3. 只引用上面列出的结果，不要编造 URL 或事实。\n"
     "4. 如果结果不足以回答，请明确说明信息不足，不要臆测。"
 )
-DEFAULT_SEARCH_MAX_RESULTS = 5
+MAX_SEARCH_QUERY_CHARS = 128
 MAX_PAGE_TEXT_CHARS = 12_000
 _ZENITH_PARAM_BLOCK_RE = re.compile(
     r"<zenith[_ ]parameter\b[^>]*>.*?</zenith[_ ]parameter\s*>\s*",
@@ -110,10 +114,8 @@ _ZENITH_TAG_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-
 def _strip_zenith(text: str) -> str:
-    """Remove harness-style tool-call blocks the model may leak into prose."""
-
+    # Strip leaked tool markup from visible output.
     cleaned = text or ""
     if "<zenith" not in cleaned.lower():
         return cleaned
@@ -132,20 +134,18 @@ def _strip_zenith(text: str) -> str:
             break
     return cleaned
 
-
 class APIError(Exception):
     pass
-
 
 def is_image_path(path: str) -> bool:
     file_path = Path(path)
     return file_path.is_file() and file_path.suffix.lower() in SUPPORTED_IMAGE_EXTS
 
-
-def _endpoint(cfg: dict, resource: str) -> str:
-    base = str(cfg.get("base_url") or "https://api.deepseek.com").strip().rstrip("/")
+def _endpoint(cfg: dict, resource: str, *, versioned: bool = False) -> str:
+    base = str(cfg.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
+    if versioned and not base.endswith("/v1"):
+        base += "/v1"
     return f"{base}/{resource.lstrip('/')}"
-
 
 def _encode_image(path: str) -> str:
     file_path = Path(path)
@@ -154,7 +154,6 @@ def _encode_image(path: str) -> str:
     mime = mimetypes.guess_type(str(file_path))[0] or "image/png"
     payload = base64.b64encode(file_path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{payload}"
-
 
 def payload_messages(history: list[dict]) -> list[dict]:
     result: list[dict] = []
@@ -188,10 +187,8 @@ def payload_messages(history: list[dict]) -> list[dict]:
             result.append(item)
     return result
 
-
 def title_messages(history: list[dict]) -> list[dict]:
-    """Build a lightweight title request from every visible dialogue turn."""
-
+    # Summarize text turns without resending images.
     result: list[dict] = [{"role": "system", "content": _TITLE_SYSTEM_PROMPT}]
     for message in history:
         role = message.get("role")
@@ -221,20 +218,16 @@ def title_messages(history: list[dict]) -> list[dict]:
     )
     return result
 
-
 def _display_units(text: str) -> int:
     return sum(
         2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
         for character in text
     )
 
-
 def clean_conversation_title(
     value: str,
     max_display_units: int = TITLE_MAX_DISPLAY_UNITS,
 ) -> str:
-    """Normalize untrusted model output into one title that fits the sidebar."""
-
     title = str(value or "").strip()
     title = re.sub(r"^```(?:text|markdown)?[ \t]*\n?", "", title, flags=re.I)
     title = re.sub(r"\n?```$", "", title).strip()
@@ -261,7 +254,6 @@ def clean_conversation_title(
         used += units
     return "".join(kept).rstrip() + "…"
 
-
 def build_chat_body(
     model: str,
     effort: str,
@@ -279,9 +271,7 @@ def build_chat_body(
         "thinking": {"type": "enabled" if deep_thinking else "disabled"},
     }
     if deep_thinking:
-        body["reasoning_effort"] = (
-            effort if effort in {"low", "high", "max"} else "high"
-        )
+        body["reasoning_effort"] = normalize_effort(effort)
     else:
         body["temperature"] = temperature
     if max_tokens > 0:
@@ -304,7 +294,6 @@ def build_chat_body(
             )
         )
     return body
-
 
 def _extract_parts(payload: dict) -> list[tuple[str, str]]:
     error = payload.get("error") if isinstance(payload, dict) else None
@@ -329,7 +318,6 @@ def _extract_parts(payload: dict) -> list[tuple[str, str]]:
                 parts.append(("content", cleaned))
     return parts
 
-
 def _response_error(response: requests.Response) -> str:
     try:
         data = response.json()
@@ -343,349 +331,111 @@ def _response_error(response: requests.Response) -> str:
     detail = response.text.strip()[:400]
     return f"HTTP {response.status_code}：{detail or '请求失败'}"
 
-
-def _search_max_results(cfg: dict) -> int:
+def _request_web_tool(
+    cfg: dict, name: str, data: dict, session: requests.Session | None
+) -> dict:
+    headers = {"Authorization": f"Bearer {cfg.get('api_key') or ''}"}
     try:
-        value = int(cfg.get("search_max_results", DEFAULT_SEARCH_MAX_RESULTS))
-    except (TypeError, ValueError):
-        value = DEFAULT_SEARCH_MAX_RESULTS
-    return max(1, min(10, value))
+        with (session or requests).post(
+            _endpoint(cfg, f"tools/{name}", versioned=True),
+            headers=headers,
+            json=data,
+            timeout=(5, 30),
+            allow_redirects=False,
+        ) as response:
+            if response.status_code != 200:
+                raise APIError(_response_error(response))
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise APIError("DeepSeek 网页工具返回了无效 JSON") from exc
+    except requests.RequestException as exc:
+        raise APIError(f"DeepSeek 网页工具请求失败：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise APIError("DeepSeek 网页工具响应格式无效")
+    return payload
 
-
-def run_web_search(cfg: dict, query: str, max_results: int | None = None) -> list[dict]:
-    """Execute one web query through the configured search provider."""
-
-    text = str(query or "").strip()
+def run_web_search(
+    cfg: dict,
+    query: str,
+    max_results: int | None = None,
+    *,
+    session: requests.Session | None = None,
+) -> list[dict]:
+    text = str(query or "").strip()[:MAX_SEARCH_QUERY_CHARS].rstrip()
     if not text:
         return []
-    provider = str(cfg.get("search_provider") or "duckduckgo").strip().lower()
-    limit = max_results if max_results is not None else _search_max_results(cfg)
-    if provider == "tavily":
-        key = str(cfg.get("search_api_key") or "").strip()
-        if not key:
-            raise APIError("Tavily 联网搜索需要先在设置中填写搜索 API Key")
-        return _tavily_search(key, text, limit)
-    return _duckduckgo_search(text, limit)
-
-
-def _search_http_error(response: requests.Response) -> str:
-    try:
-        data = response.json()
-        if isinstance(data, dict):
-            detail = data.get("message") or data.get("detail")
-            if isinstance(detail, dict):
-                detail = detail.get("error") or detail.get("message") or detail
-            if detail:
-                return f"HTTP {response.status_code}：{detail}"
-    except ValueError:
-        pass
-    text = response.text.strip()[:400]
-    return f"HTTP {response.status_code}：{text or '搜索服务请求失败'}"
-
-
-def _tavily_search(key: str, query: str, max_results: int) -> list[dict]:
-    try:
-        response = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": key,
-                "query": query,
-                "max_results": max_results,
-                "search_depth": "basic",
-                "include_answer": False,
-            },
-            timeout=(5, 30),
-        )
-    except requests.RequestException as exc:
-        raise APIError(f"联网搜索请求失败：{exc}") from exc
-    if response.status_code != 200:
-        raise APIError(_search_http_error(response))
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise APIError("搜索服务返回了无效 JSON") from exc
+    count = search_result_count(
+        cfg.get("search_max_results") if max_results is None else max_results
+    )
+    payload = _request_web_tool(
+        cfg, "search", {"query": text, "count": count, "need_content": False}, session
+    )
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        raise APIError("DeepSeek 搜索结果格式无效")
     results: list[dict] = []
-    for item in data.get("results") or []:
+    for item in raw_results:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
         url = str(item.get("url") or "").strip()
-        snippet = str(item.get("content") or "").strip()
-        if not (title or snippet or url):
-            continue
-        results.append({"title": title, "url": url, "snippet": snippet})
+        summary = str(item.get("summary") or "").strip()
+        snippet = summary or str(item.get("snippet") or "").strip()
+        if title or url or snippet:
+            results.append({"title": title, "url": url, "snippet": snippet})
     return results
-
-
-_DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
-_DDG_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml",
-}
-_DDG_LINK_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", flags=re.IGNORECASE | re.DOTALL)
-_DDG_SNIPPET_RE = re.compile(
-    r"<td\b[^>]*class=[\"']result-snippet[\"'][^>]*>(.*?)</td>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
-
-def _duckduckgo_search(query: str, max_results: int) -> list[dict]:
-    try:
-        response = requests.post(
-            _DDG_LITE_URL,
-            data={"q": query},
-            headers=_DDG_HEADERS,
-            timeout=(5, 20),
-        )
-    except requests.RequestException as exc:
-        raise APIError(f"联网搜索请求失败：{exc}") from exc
-    if response.status_code != 200:
-        raise APIError(_search_http_error(response))
-    return _parse_duckduckgo_lite(response.text, max_results)
-
-
-def _strip_html_tags(fragment: str) -> str:
-    return html.unescape(re.sub(r"<[^>]+>", " ", fragment or ""))
-
-
-def _ddg_target(url: str) -> str:
-    parsed = urlparse(url.strip())
-    target = ""
-    if "duckduckgo.com" in parsed.netloc and parsed.path.endswith("/l/"):
-        target = (parse_qs(parsed.query).get("uddg") or [""])[0]
-    if not target:
-        target = url.strip()
-    target = unquote(target)
-    if target.startswith("//"):
-        target = "https:" + target
-    return target
-
-
-def _parse_duckduckgo_lite(page: str, max_results: int) -> list[dict]:
-    links: list[tuple[str, str]] = []
-    for match in _DDG_LINK_RE.finditer(page or ""):
-        attributes = match.group(1)
-        if "result-link" not in attributes:
-            continue
-        href = re.search(r"""href=["']([^"']+)""", attributes, flags=re.IGNORECASE)
-        if not href:
-            continue
-        links.append((href.group(1), match.group(2)))
-    snippets = _DDG_SNIPPET_RE.findall(page or "")
-
-    results: list[dict] = []
-    seen: set[str] = set()
-    for index, (href, title) in enumerate(links):
-        url = _ddg_target(href)
-        if not url or url in seen:
-            continue
-        snippet = snippets[index] if index < len(snippets) else ""
-        title_text = " ".join(_strip_html_tags(title).split())
-        snippet_text = " ".join(_strip_html_tags(snippet).split())
-        if not title_text and not snippet_text:
-            continue
-        results.append({"title": title_text, "url": url, "snippet": snippet_text})
-        seen.add(url)
-        if len(results) >= max_results:
-            break
-    return results
-
-
-class _PageTextExtractor(HTMLParser):
-    """Collect visible text from a fetched page while dropping noisy elements."""
-
-    _SKIP_TAGS = {"script", "style", "noscript", "template", "svg"}
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._skip_depth = 0
-        self._capturing_title = False
-        self._title: list[str] = []
-        self._chunks: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        lowered = tag.lower()
-        if lowered in self._SKIP_TAGS:
-            self._skip_depth += 1
-        elif lowered == "title" and self._skip_depth == 0:
-            self._capturing_title = True
-        elif lowered in {"p", "div", "li", "tr", "br", "h1", "h2", "h3", "h4", "td", "th"}:
-            self._chunks.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        lowered = tag.lower()
-        if lowered in self._SKIP_TAGS and self._skip_depth > 0:
-            self._skip_depth -= 1
-        elif lowered == "title":
-            self._capturing_title = False
-        elif lowered in {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "td", "th"}:
-            self._chunks.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth > 0:
-            return
-        if self._capturing_title:
-            self._title.append(data)
-        else:
-            self._chunks.append(data)
-
-    def title(self) -> str:
-        return " ".join("".join(self._title).split())
-
-    def text(self) -> str:
-        return re.sub(r"[ \t]*\n[ \t]*", "\n", " ".join(self._chunks)).strip()
-
-
-def _is_loopback_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.endswith(
-        ".localhost"
-    )
-
 
 def fetch_page_text(
-    url: str, max_chars: int = MAX_PAGE_TEXT_CHARS
+    cfg: dict,
+    url: str,
+    max_chars: int = MAX_PAGE_TEXT_CHARS,
+    *,
+    session: requests.Session | None = None,
 ) -> dict:
-    """Fetch one page and return its title plus readable plain text."""
-
     target = str(url or "").strip()
-    parsed = urlparse(target)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise APIError("页面地址无效，只支持 http(s) URL")
-    if _is_loopback_url(target):
+    try:
+        parsed = urlparse(target)
+    except ValueError as exc:
+        raise APIError("页面地址无效，只支持 http(s) URL") from exc
+    host = parsed.hostname
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or len(target) > 8192
+    ):
+        raise APIError("页面地址无效，只支持不含凭证的 http(s) URL")
+    if host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.endswith(".localhost"):
         raise APIError("不能读取本机回环地址")
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml",
-    }
-    try:
-        response = requests.get(target, headers=headers, timeout=(8, 25), stream=True)
-    except requests.RequestException as exc:
-        raise APIError(f"打开页面失败：{exc}") from exc
-    if response.status_code != 200:
-        raise APIError(_search_http_error(response))
-    content_type = response.headers.get("Content-Type", "")
-    if "html" not in content_type.lower() and "text" not in content_type.lower():
-        raise APIError("页面不是可读取的文本或 HTML")
-    try:
-        chunks: list[bytes] = []
-        size = 0
-        for piece in response.iter_content(chunk_size=32 * 1024):
-            if not piece:
-                continue
-            chunks.append(piece)
-            size += len(piece)
-            if size >= 2 * 1024 * 1024:
-                break
-        raw = b"".join(chunks)
-    except requests.RequestException as exc:
-        raise APIError(f"读取页面失败：{exc}") from exc
-    finally:
-        response.close()
-    try:
-        page = raw.decode(response.encoding or "utf-8", errors="replace")
-    except (LookupError, UnicodeDecodeError):
-        page = raw.decode("utf-8", errors="replace")
-    extractor = _PageTextExtractor()
-    extractor.feed(page)
-    text = extractor.text()
-    if len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "…"
-    title = extractor.title() or parsed.netloc
-    return {"title": title, "url": target, "snippet": text}
+    payload = _request_web_tool(cfg, "fetch", {"url": target}, session)
+    content = str(payload.get("content") or "").strip()
+    if len(content) > max_chars:
+        content = content[:max_chars].rstrip() + "…"
+    title = str(payload.get("title") or "").strip() or parsed.netloc
+    return {"title": title, "url": target, "snippet": content}
 
-
-def _tool_urls(arguments: str) -> list[str]:
+def _tool_argument(arguments: str, *keys: str) -> str:
     try:
-        parsed = json.loads(arguments or "{}")
+        value = json.loads(arguments or "{}")
     except json.JSONDecodeError:
-        return []
-    if isinstance(parsed, str):
-        return [parsed.strip()] if parsed.strip() else []
-    if not isinstance(parsed, dict):
-        return []
-    url = parsed.get("url") or parsed.get("link") or parsed.get("href")
-    if isinstance(url, str) and url.strip():
-        return [url.strip()]
-    return []
+        return ""
+    if isinstance(value, dict):
+        value = next((value[key] for key in keys if value.get(key)), "")
+    return value.strip() if isinstance(value, str) else ""
 
-
-def _dedupe_results(results: list[dict]) -> list[dict]:
-    kept: list[dict] = []
-    seen: set[str] = set()
-    for item in results:
-        url = str(item.get("url") or "").strip()
-        key = url or f"{item.get('title')}|{item.get('snippet')}"
-        if key in seen:
-            continue
-        seen.add(key)
-        kept.append(item)
-    return kept
-
-
-def format_search_results(results: list[dict]) -> str:
-    """Number sources so the model can cite them inline as [1], [2], ..."""
-
+def _sources_tool_content(results: dict[int, dict]) -> str:
     entries: list[str] = []
-    for index, item in enumerate(_dedupe_results(results), 1):
-        title = str(item.get("title") or "无标题").strip()
-        url = str(item.get("url") or "").strip()
-        snippet = str(item.get("snippet") or "").strip()
-        entry = f"[{index}] {title}"
-        if url:
-            entry += f"\nURL: {url}"
-        if snippet:
-            entry += f"\n摘要: {snippet}"
-        entries.append(entry)
-    return "\n\n".join(entries) if entries else "本次搜索没有返回可用结果。"
-
-
-def search_tool_content(results: list[dict]) -> str:
-    return _SEARCH_RESULT_PROMPT.format(results=format_search_results(results))
-
-
-def sources_tool_content(sources: list[dict], indices: list[int]) -> str:
-    """Format a subset of a global source registry using its stable numbers."""
-
-    entries: list[str] = []
-    for number in indices:
-        if number < 1 or number > len(sources):
-            continue
-        item = sources[number - 1]
-        title = str(item.get("title") or "无标题").strip()
-        url = str(item.get("url") or "").strip()
-        snippet = str(item.get("snippet") or "").strip()
+    for number, item in results.items():
+        title = item["title"] or "无标题"
         entry = f"[{number}] {title}"
-        if url:
-            entry += f"\nURL: {url}"
-        if snippet:
-            entry += f"\n摘要: {snippet}"
+        if item["url"]:
+            entry += f"\nURL: {item['url']}"
+        if item["snippet"]:
+            entry += f"\n摘要: {item['snippet']}"
         entries.append(entry)
-    return _SEARCH_RESULT_PROMPT.format(
-        results="\n\n".join(entries) if entries else "本次操作没有返回可用结果。"
-    )
-
-
-def _tool_queries(arguments: str) -> list[str]:
-    try:
-        parsed = json.loads(arguments or "{}")
-    except json.JSONDecodeError:
-        return []
-    if isinstance(parsed, str):
-        return [parsed.strip()] if parsed.strip() else []
-    if not isinstance(parsed, dict):
-        return []
-    query = parsed.get("query") or parsed.get("q") or parsed.get("keywords")
-    if isinstance(query, str) and query.strip():
-        return [query.strip()]
-    return []
-
+    return _SEARCH_RESULT_PROMPT.format(results="\n\n".join(entries))
 
 def list_models(cfg: dict, timeout: tuple[int, int] = (5, 15)) -> list[str]:
     headers = {"Authorization": f"Bearer {cfg.get('api_key') or ''}"}
@@ -714,12 +464,9 @@ def list_models(cfg: dict, timeout: tuple[int, int] = (5, 15)) -> list[str]:
     except (ValueError, TypeError) as exc:
         raise APIError("模型列表响应格式无效") from exc
 
-
 def _iter_chat_payloads(
     response: requests.Response, stop: threading.Event
 ) -> Iterator[dict]:
-    """Yield parsed JSON payloads from a Chat Completions response."""
-
     with response:
         if response.status_code != 200:
             raise APIError(_response_error(response))
@@ -746,7 +493,6 @@ def _iter_chat_payloads(
             except json.JSONDecodeError:
                 continue
 
-
 def _chat_headers(cfg: dict) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {cfg.get('api_key') or ''}",
@@ -754,6 +500,35 @@ def _chat_headers(cfg: dict) -> dict[str, str]:
         "Accept": "text/event-stream",
     }
 
+def _request_chat_payloads(
+    cfg: dict,
+    body: dict,
+    stop: threading.Event,
+    timeout: tuple[int, int],
+    response_callback: Callable[[requests.Response | None], None] | None,
+    session: requests.Session | None = None,
+) -> Iterator[dict]:
+    if stop.is_set():
+        return
+    try:
+        response = (session or requests).post(
+            _endpoint(cfg, "chat/completions"),
+            headers=_chat_headers(cfg),
+            json=body,
+            stream=True,
+            timeout=timeout,
+        )
+        if response_callback:
+            response_callback(response)
+        for payload in _iter_chat_payloads(response, stop):
+            if stop.is_set():
+                return
+            yield payload
+    except requests.RequestException as exc:
+        raise APIError(f"网络请求失败：{exc}") from exc
+    finally:
+        if response_callback:
+            response_callback(None)
 
 def stream_chat(
     cfg: dict,
@@ -770,45 +545,17 @@ def stream_chat(
     web_search: bool = False,
 ) -> Iterator[tuple[str, str]]:
     if web_search:
-        yield from stream_search_function(
-            cfg,
-            model,
-            effort,
-            deep_thinking,
-            messages,
-            temperature,
-            max_tokens,
-            stop,
-            timeout=timeout,
-            response_callback=response_callback,
-        )
+        with requests.Session() as session:
+            yield from stream_search_function(
+                cfg, model, effort, deep_thinking, messages, temperature, max_tokens,
+                stop, timeout, response_callback, session,
+            )
         return
     body = build_chat_body(
         model, effort, deep_thinking, messages, temperature, max_tokens
     )
-    if stop.is_set():
-        return
-    response: requests.Response | None = None
-    try:
-        response = requests.post(
-            _endpoint(cfg, "chat/completions"),
-            headers=_chat_headers(cfg),
-            json=body,
-            stream=True,
-            timeout=timeout,
-        )
-        if response_callback:
-            response_callback(response)
-        for payload in _iter_chat_payloads(response, stop):
-            if stop.is_set():
-                return
-            yield from _extract_parts(payload)
-    except requests.RequestException as exc:
-        raise APIError(f"网络请求失败：{exc}") from exc
-    finally:
-        if response_callback:
-            response_callback(None)
-
+    for payload in _request_chat_payloads(cfg, body, stop, timeout, response_callback):
+        yield from _extract_parts(payload)
 
 def stream_search_function(
     cfg: dict,
@@ -819,25 +566,12 @@ def stream_search_function(
     temperature: float,
     max_tokens: int,
     stop: threading.Event,
-    timeout: tuple[int, int] = (10, 600),
-    response_callback: Callable[[requests.Response | None], None] | None = None,
+    timeout: tuple[int, int],
+    response_callback: Callable[[requests.Response | None], None] | None,
+    session: requests.Session,
 ) -> Iterator[tuple[str, str]]:
-    """Run tool rounds until the model returns one consistently sourced answer."""
-
-    if stop.is_set():
-        return
     working = list(messages)
-    sources: list[dict] = []
     source_numbers: dict[str, int] = {}
-
-    def register(result: dict) -> int:
-        url = str(result.get("url") or "").strip()
-        key = url or f"{result.get('title')}|{result.get('snippet')}"
-        if key in source_numbers:
-            return source_numbers[key]
-        sources.append(result)
-        source_numbers[key] = len(sources)
-        return len(sources)
 
     for round_index in range(MAX_SEARCH_ROUNDS):
         if stop.is_set():
@@ -855,96 +589,90 @@ def stream_search_function(
         tool_calls: dict[int, dict[str, str]] = {}
         round_content: list[str] = []
         round_reasoning: list[str] = []
-        response: requests.Response | None = None
-        try:
-            response = requests.post(
-                _endpoint(cfg, "chat/completions"),
-                headers=_chat_headers(cfg),
-                json=body,
-                stream=True,
-                timeout=timeout,
-            )
-            if response_callback:
-                response_callback(response)
-            for payload in _iter_chat_payloads(response, stop):
-                if stop.is_set():
-                    return
-                if payload.get("error"):
-                    _extract_parts(payload)
-                for choice in payload.get("choices") or []:
-                    delta = choice.get("delta") or choice.get("message") or {}
-                    raw_reasoning = str(
-                        delta.get("reasoning_content") or delta.get("reasoning") or ""
-                    )
+        for payload in _request_chat_payloads(
+            cfg, body, stop, timeout, response_callback, session
+        ):
+            if payload.get("error"):
+                _extract_parts(payload)
+            for choice in payload.get("choices") or []:
+                delta = choice.get("delta") or choice.get("message") or {}
+                raw_reasoning = str(
+                    delta.get("reasoning_content") or delta.get("reasoning") or ""
+                )
+                if raw_reasoning:
                     round_reasoning.append(raw_reasoning)
                     reasoning = _strip_zenith(raw_reasoning)
-                    content = _strip_zenith(str(delta.get("content") or ""))
                     if reasoning:
                         yield ("reasoning", reasoning)
-                    if content:
-                        round_content.append(content)
-                    for call in delta.get("tool_calls") or []:
-                        if not isinstance(call, dict):
-                            continue
-                        index = int(call.get("index", 0))
-                        entry = tool_calls.setdefault(
-                            index, {"id": "", "name": "", "arguments": ""}
-                        )
-                        if call.get("id"):
-                            entry["id"] = str(call["id"])
-                        function = call.get("function")
-                        if isinstance(function, dict):
-                            if function.get("name"):
-                                entry["name"] = str(function["name"])
-                            if function.get("arguments"):
-                                entry["arguments"] += str(function["arguments"])
-        except requests.RequestException as exc:
-            raise APIError(f"网络请求失败：{exc}") from exc
-        finally:
-            if response_callback:
-                response_callback(None)
+                content = _strip_zenith(str(delta.get("content") or ""))
+                if content:
+                    round_content.append(content)
+                for call in delta.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    index = int(call.get("index", 0))
+                    entry = tool_calls.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if call.get("id"):
+                        entry["id"] = str(call["id"])
+                    function = call.get("function")
+                    if isinstance(function, dict):
+                        if function.get("name"):
+                            entry["name"] = str(function["name"])
+                        if function.get("arguments"):
+                            entry["arguments"] += str(function["arguments"])
 
         if stop.is_set():
             return
         if not tool_calls:
-            # Do not expose a tool-call preamble as the final answer before the final model round.
+            # Only show answer text from a round that finished without tool calls.
             for content in round_content:
                 yield ("content", content)
             return
 
         yield ("search", "正在联网搜索…")
-        call_numbers: dict[str, list[int]] = {}
-        call_errors: dict[str, list[str]] = {}
-        for index in sorted(tool_calls):
-            call = tool_calls[index]
+        calls: list[dict] = []
+        tool_messages: list[dict] = []
+        for index, call in sorted(tool_calls.items()):
+            if stop.is_set():
+                return
             call_id = call["id"] or f"call_{index}"
-            name = (call.get("name") or "").strip()
-            numbers: list[int] = []
-            errors: list[str] = []
-            if name in {OPEN_PAGE_TOOL_NAME, WEB_FETCH_TOOL_NAME}:
-                for url in _tool_urls(call.get("arguments") or ""):
-                    if stop.is_set():
-                        return
-                    try:
-                        numbers.append(register(fetch_page_text(url)))
-                    except APIError as exc:
-                        errors.append(str(exc))
-            else:
-                for query in _tool_queries(call.get("arguments") or ""):
-                    if stop.is_set():
-                        return
-                    try:
-                        for result in run_web_search(cfg, query):
-                            numbers.append(register(result))
-                    except APIError as exc:
-                        errors.append(str(exc))
-            call_numbers[call_id] = numbers
-            call_errors[call_id] = errors
+            name = call["name"].strip() or SEARCH_TOOL_NAME
+            arguments = call["arguments"] or "{}"
+            calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            })
+            try:
+                if name in {OPEN_PAGE_TOOL_NAME, WEB_FETCH_TOOL_NAME}:
+                    url = _tool_argument(arguments, "url", "link", "href")
+                    results = [fetch_page_text(cfg, url, session=session)] if url else []
+                else:
+                    query = _tool_argument(arguments, "query", "q", "keywords")
+                    results = run_web_search(cfg, query, session=session) if query else []
+                numbered_results: dict[int, dict] = {}
+                for result in results:
+                    # Reuse the citation number and keep this call's result text.
+                    key = result["url"] or f"{result['title']}|{result['snippet']}"
+                    number = source_numbers.setdefault(key, len(source_numbers) + 1)
+                    numbered_results.setdefault(number, result)
+                content = (
+                    _sources_tool_content(numbered_results)
+                    if numbered_results
+                    else "本次操作没有返回可用结果。"
+                )
+            except APIError as exc:
+                content = f"工具执行失败：{exc}"
+            tool_messages.append(
+                {"role": "tool", "tool_call_id": call_id, "content": content}
+            )
 
         if stop.is_set():
             return
-        if sources:
-            yield ("search", f"已获取 {len(sources)} 条结果，正在生成回答…")
+        if source_numbers:
+            yield ("search", f"已获取 {len(source_numbers)} 条结果，正在生成回答…")
         else:
             yield ("search", "未找到可用结果，正在生成回答…")
 
@@ -953,33 +681,10 @@ def stream_search_function(
                 "role": "assistant",
                 "content": "".join(round_content).strip() or None,
                 "reasoning_content": "".join(round_reasoning),
-                "tool_calls": [
-                    {
-                        "id": tool_calls[index]["id"] or f"call_{index}",
-                        "type": "function",
-                        "function": {
-                            "name": tool_calls[index]["name"] or SEARCH_TOOL_NAME,
-                            "arguments": tool_calls[index]["arguments"] or "{}",
-                        },
-                    }
-                    for index in sorted(tool_calls)
-                ],
+                "tool_calls": calls,
             }
         )
-        for index in sorted(tool_calls):
-            call = tool_calls[index]
-            call_id = call["id"] or f"call_{index}"
-            numbers = call_numbers.get(call_id, [])
-            errors = call_errors.get(call_id, [])
-            if numbers:
-                content = sources_tool_content(sources, numbers)
-            elif errors:
-                content = "工具执行失败：" + "；".join(errors[:2])
-            else:
-                content = "本次操作没有返回可用结果。"
-            working.append(
-                {"role": "tool", "tool_call_id": call_id, "content": content}
-            )
+        working.extend(tool_messages)
 
     working.append(
         {
@@ -991,25 +696,10 @@ def stream_search_function(
         }
     )
     body = build_chat_body(
-        model, effort, deep_thinking, working, temperature, max_tokens
+        model, effort, deep_thinking, working, temperature, max_tokens,
+        web_search=True, tool_choice="none",
     )
-    response = None
-    try:
-        response = requests.post(
-            _endpoint(cfg, "chat/completions"),
-            headers=_chat_headers(cfg),
-            json=body,
-            stream=True,
-            timeout=timeout,
-        )
-        if response_callback:
-            response_callback(response)
-        for payload in _iter_chat_payloads(response, stop):
-            if stop.is_set():
-                return
-            yield from _extract_parts(payload)
-    except requests.RequestException as exc:
-        raise APIError(f"网络请求失败：{exc}") from exc
-    finally:
-        if response_callback:
-            response_callback(None)
+    for payload in _request_chat_payloads(
+        cfg, body, stop, timeout, response_callback, session
+    ):
+        yield from _extract_parts(payload)

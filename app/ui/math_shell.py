@@ -1,5 +1,4 @@
-"""Render synchronized slices of one Markdown document in GPU-safe web tiles."""
-
+# Render synchronized slices of one document in web tiles.
 from __future__ import annotations
 
 MATH_WEB_SHELL = r"""<!doctype html>
@@ -41,13 +40,13 @@ MATH_WEB_SHELL = r"""<!doctype html>
       const root = document.getElementById("content-root");
       const body = document.createElement("div");
       body.className = "markdown-body";
-      // This anchor separates frozen HTML from the replaceable live tail.
+      // Separate the stable body from the live tail.
       const tailAnchor = document.createElement("span");
       tailAnchor.className = "deepseek-stream-anchor";
       let bridge = null;
-      // Keep an open code fence's growing line in one replaceable text node.
+      // Replace the live code line in place.
       let codeTailNode = null;
-      // Track the first changed row so older tiles can skip an update.
+      // Skip tiles above the changed row.
       let lastChangedTop = 0;
       let reportedHeight = -1;
 
@@ -200,7 +199,6 @@ MATH_WEB_SHELL = r"""<!doctype html>
         body.innerHTML = data.stable || "";
         body.appendChild(tailAnchor);
         const tail = fragment(data.tail || "");
-        renderFormulas(tail);
         body.appendChild(tail);
         setCodeTail(data.codeTail || "");
         renderFormulas(body);
@@ -342,7 +340,7 @@ MATH_WEB_SHELL = r"""<!doctype html>
         });
       }
 
-      // Forward vertical gestures because the outer chat lane owns scrolling.
+      // Forward vertical scrolling to the chat.
       const lockScroll = () => {
         if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
       };
@@ -369,7 +367,7 @@ MATH_WEB_SHELL = r"""<!doctype html>
         event.preventDefault();
       }, { passive: false });
 
-      // Record entry-point failures so a blank surface remains diagnosable.
+      // Record renderer errors for diagnostics.
       [
         "setDeepSeekDocument",
         "setDeepSeekStream",

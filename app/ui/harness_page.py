@@ -29,10 +29,8 @@ from .icons import tint_pixmap
 from .sidebar import ProductModeSelector
 from .theme import colors
 
-
 class _HarnessWebPage(QWebEnginePage):
-    """Keep the embedded surface on loopback and open external links safely."""
-
+    # Keep navigation local and hand external links to macOS.
     def __init__(self, profile: QWebEngineProfile, allowed_origin: str, parent=None) -> None:
         super().__init__(profile, parent)
         self._allowed_origin = allowed_origin.rstrip("/")
@@ -47,10 +45,7 @@ class _HarnessWebPage(QWebEnginePage):
             return False
         return False
 
-
 class HarnessSurface(QWidget):
-    """Official Harness canvas rendered below MainWindow's app-level bar."""
-
     modeRequested = Signal(str)
     retryRequested = Signal()
 
@@ -72,8 +67,6 @@ class HarnessSurface(QWidget):
         self._resize_children()
 
     def _build_content_host(self) -> None:
-        """Reserve a separate canvas so the official sidebar starts cleanly."""
-
         self.content_host = QWidget(self)
         self.content_host.setObjectName("harnessContentHost")
         self.status_panel.setParent(self.content_host)
@@ -160,7 +153,7 @@ class HarnessSurface(QWidget):
         return view
 
     def _load_url(self, view: QWebEngineView, url: str) -> None:
-        # Harness cookies include the random port, so a private clean profile avoids stale authentication.
+        # Clear cookies before authenticating on a new port.
         if self._profile is not None:
             self._profile.cookieStore().deleteAllCookies()
         view.load(QUrl(url))
@@ -169,7 +162,7 @@ class HarnessSurface(QWidget):
         if self._web_view is not None:
             return self._web_view
         self._profile = QWebEngineProfile("deepseek-harness-desktop", self)
-        # Do not restore dsh-auth cookies from an old port; keep the profile session-only.
+        # Keep Harness cookies in memory.
         self._profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies
         )
@@ -223,8 +216,6 @@ class HarnessSurface(QWidget):
             self._reveal_web()
 
     def dispose(self) -> None:
-        """Retire WebEngine objects asynchronously through Qt ownership."""
-
         if self._disposing:
             return
         self._disposing = True
@@ -295,10 +286,7 @@ class HarnessSurface(QWidget):
             )
         )
 
-
 class HarnessPage(QWidget):
-    """Own the official Harness subprocess and its embedded Web UI."""
-
     modeRequested = Signal(str)
 
     def __init__(self, cfg: dict, theme: str = "light", parent=None) -> None:
@@ -336,8 +324,6 @@ class HarnessPage(QWidget):
                 self.surface.show_status("Harness 配置已更新，下次进入时会重新启动。")
 
     def start(self, silent: bool = False) -> None:
-        """Start the runtime for a user-visible visit and reveal the surface."""
-
         self._surface_pending = False
         if self.runtime.is_ready:
             if self.isVisible() and not self.window().isMinimized():
@@ -354,8 +340,7 @@ class HarnessPage(QWidget):
         self.runtime.start(working_directory)
 
     def warm(self) -> None:
-        """Start only the Harness service; leave WebEngine for an explicit visit."""
-
+        # Warm the service before opening its WebEngine surface.
         self.runtime.start(self._working_directory())
 
     def _working_directory(self) -> Path:
@@ -411,6 +396,5 @@ class HarnessPage(QWidget):
         self._surface_pending = False
         self.runtime.stop()
         self.surface.dispose()
-
 
 __all__ = ["HarnessPage", "HarnessSurface"]

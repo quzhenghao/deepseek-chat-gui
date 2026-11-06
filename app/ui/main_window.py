@@ -46,10 +46,12 @@ from ..api import (
     title_messages,
 )
 from ..config import (
+    DEFAULT_EFFORT,
     EFFORT_LEVELS,
     effort_label,
     is_vision_model,
     model_label,
+    normalize_effort,
     sanitize_config,
     save_config,
     supports_thinking,
@@ -80,7 +82,6 @@ from .theme import (
     build_qss,
     colors,
 )
-
 
 class ChatTextEdit(QTextEdit):
     submitRequested = Signal()
@@ -156,8 +157,6 @@ class ChatTextEdit(QTextEdit):
         super().insertFromMimeData(source)
 
     def contextMenuEvent(self, event) -> None:
-        """Standard edit actions on the app's flat, opaque menu surface."""
-
         show_edit_menu(
             self,
             event.globalPos(),
@@ -327,7 +326,7 @@ class InputPanel(QWidget):
         self.expand_button.setToolTip("收起输入框" if expanded else "展开输入框")
 
     def current_effort(self) -> str:
-        return str(self.effort_combo.currentData() or "high")
+        return str(self.effort_combo.currentData() or DEFAULT_EFFORT)
 
     def is_thinking(self) -> bool:
         return self.thinking_button.isChecked()
@@ -354,7 +353,7 @@ class InputPanel(QWidget):
         )
 
     def set_effort(self, effort: str) -> None:
-        index = self.effort_combo.findData(effort)
+        index = self.effort_combo.findData(normalize_effort(effort))
         if index >= 0:
             self.effort_combo.setCurrentIndex(index)
 
@@ -407,10 +406,14 @@ class InputPanel(QWidget):
         self._action_icon_state = state
         palette = colors(self._theme)
         if self._generating:
-            apply_icon(self.action_button, "stop", "#FFFFFF", 18)
+            apply_icon(self.action_button, "stop", palette["primary_fg"], 18)
             self.action_button.setToolTip("停止生成")
         else:
-            color = "#FFFFFF" if self.action_button.isEnabled() else palette["fg_muted"]
+            color = (
+                palette["primary_fg"]
+                if self.action_button.isEnabled()
+                else palette["fg_muted"]
+            )
             apply_icon(self.action_button, "send", color, 19)
             self.action_button.setToolTip("发送")
 
@@ -446,7 +449,7 @@ class InputPanel(QWidget):
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
         palette = colors(theme)
-        # Use an even icon canvas to center it inside the 34px circular button.
+        # Center the icon in the circular button.
         apply_icon(self.attach_button, "plus", palette["fg_sub"], 20)
         self._refresh_expand_button()
         self.effort_combo.set_theme(theme)
@@ -466,10 +469,7 @@ class InputPanel(QWidget):
         self.image_strip.set_style(theme)
         self._shadow.setColor(QColor(palette["shadow"]))
 
-
 class ChatWorkspace(QWidget):
-    """Place one composer at the welcome center or conversation bottom."""
-
     FOLLOW_BUTTON_GAP = 16
 
     def __init__(self, theme: str = "light", parent=None) -> None:
@@ -629,8 +629,6 @@ class ChatWorkspace(QWidget):
         self._welcome_transition_active = True
 
     def _place_follow_button(self) -> None:
-        """Park the control beside the submit button, on its exact baseline."""
-
         if self._panel is None:
             return
         panel_layout = self._panel.layout()
@@ -661,7 +659,6 @@ class ChatWorkspace(QWidget):
             self._welcome_panel_bottom = None
         self._sync_layout()
 
-
 @dataclass
 class StreamContext:
     conversation_id: str
@@ -676,13 +673,11 @@ class StreamContext:
     stopped: bool = False
     worker: ChatWorker | None = None
 
-
 @dataclass
 class DraftState:
     text: str
     images: list[str]
     cursor_position: int
-
 
 class MainWindow(QMainWindow):
     def __init__(self, cfg: dict, store, app: QApplication) -> None:
@@ -810,7 +805,7 @@ class MainWindow(QMainWindow):
             self.chat_input,
             bool(self.cfg.get("deep_thinking", True)),
             bool(self.cfg.get("web_search", True)),
-            self.cfg.get("last_effort", "high"),
+            self.cfg.get("last_effort", DEFAULT_EFFORT),
             self._theme,
             parent=self.chat_workspace,
         )
@@ -860,8 +855,6 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_mode_bar(self, parent_layout: QVBoxLayout) -> None:
-        """Create the one product switcher shared by Chat and Harness."""
-
         self.mode_bar = QFrame()
         self.mode_bar.setObjectName("modeBar")
         self.mode_bar.setFixedHeight(58)
@@ -1041,8 +1034,6 @@ class MainWindow(QMainWindow):
         self.chat_input.setFocus()
 
     def _switch_mode(self, mode: str) -> None:
-        """Switch the product surface while keeping one synchronized selector."""
-
         normalized = mode if mode in {"chat", "harness"} else "chat"
         self.mode_selector.set_mode(normalized)
         self.sidebar.set_mode(normalized)
@@ -1121,15 +1112,13 @@ class MainWindow(QMainWindow):
         self.set_sidebar_collapsed(not self._sidebar_collapsed)
 
     def set_sidebar_collapsed(self, collapsed: bool, animate: bool = True) -> None:
-        """Animate the chat sidebar between its full page and the icon rail."""
-
         collapsed = bool(collapsed)
         self._sidebar_collapsed = collapsed
         target = RAIL_SIDEBAR_WIDTH if collapsed else SIDEBAR_DEFAULT_WIDTH
         if collapsed:
             self.sidebar.setMinimumWidth(RAIL_SIDEBAR_WIDTH)
         else:
-            # Reveal the full page before the narrow-sidebar animation swaps it.
+            # Show the full sidebar before animating its width.
             self.sidebar.set_collapsed(False)
         self._sidebar_animator.stop()
         start = self.sidebar.width() or SIDEBAR_DEFAULT_WIDTH

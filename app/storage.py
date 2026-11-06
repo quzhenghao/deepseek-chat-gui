@@ -8,10 +8,8 @@ from pathlib import Path
 
 from .config import DATA_PATH, MEDIA_DIR, ensure_dir
 
-
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
 
 class ConversationStore:
     def __init__(self) -> None:
@@ -78,8 +76,7 @@ class ConversationStore:
             self.save()
 
     def update_title(self, conversation_id: str, title: str) -> None:
-        """Apply an automatic title without changing the dialogue's recency."""
-
+        # Preserve conversation recency for automatic titles.
         conversation = self.get(conversation_id)
         if conversation and title.strip():
             conversation["title"] = title.strip()

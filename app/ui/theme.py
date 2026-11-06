@@ -1,60 +1,65 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 from .. import ASSETS_DIR
 
-
-ACCENT = "#171717"
+ACCENT = "#293346"
 
 _LIGHT = {
-    "bg": "#FFFFFF",
+    "bg": "#FAFBFD",
     "side_bg": "#F3F3F3",
     "panel": "#FFFFFF",
-    "canvas": "#FFFFFF",
-    "border": "#E6E7E9",
-    "border_strong": "#D4D6D9",
-    "fg": "#1B1B1C",
-    "fg_sub": "#5D626A",
-    "fg_muted": "#92979F",
+    "canvas": "#FAFBFD",
+    "border": "#E3E7EE",
+    "border_strong": "#CCD4E0",
+    "fg": "#202733",
+    "fg_sub": "#4D5A6E",
+    "fg_muted": "#667389",
     "entry_fg": "#000000",
-    "hover": "#ECEDEF",
-    "selected": "#E3E5E8",
+    "link": "#304E86",
+    "hover": "#EEF1F6",
+    "selected": "#DFE6F1",
     "accent": ACCENT,
-    "accent_hover": "#000000",
-    "accent_soft": "#EEEEEE",
-    "mode_active": "#1B1B1C",
+    "accent_hover": "#172238",
+    "accent_soft": "#EBF0F8",
+    "mode_active": ACCENT,
     "mode_active_fg": "#FFFFFF",
+    "checkbox_fill": ACCENT,
     "primary_fg": "#FFFFFF",
-    "user_bubble": "#F0F1F2",
-    "reason_bg": "#F7F7F8",
-    "code_bg": "#F4F5F6",
+    "user_bubble": "#EAF0F8",
+    "reason_bg": "#F3F5F9",
+    "code_bg": "#F1F4F8",
     "danger": "#D92D20",
     "danger_soft": "#FFF1F0",
-    "success": "#12B76A",
-    "shadow": "#1717171A",
+    "success": "#16734F",
+    "shadow": "#16273957",
 }
 
 _DARK = {
-    "bg": "#1A1A1A",
-    "side_bg": "#141414",
-    "panel": "#222222",
-    "canvas": "#1A1A1A",
-    "border": "#333333",
-    "border_strong": "#454545",
-    "fg": "#F2F2F2",
-    "fg_sub": "#B7B7B7",
-    "fg_muted": "#858585",
+    "bg": "#181C24",
+    "side_bg": "#12161D",
+    "panel": "#202630",
+    "canvas": "#181C24",
+    "border": "#303846",
+    "border_strong": "#455166",
+    "fg": "#E9EEF7",
+    "fg_sub": "#B7C2D5",
+    "fg_muted": "#93A3BC",
     "entry_fg": "#FFFFFF",
-    "hover": "#2A2A2A",
-    "selected": "#363636",
-    "accent": "#E8E8E8",
-    "accent_hover": "#FFFFFF",
-    "accent_soft": "#353535",
-    "mode_active": "#F2F2F2",
-    "mode_active_fg": "#141414",
-    "primary_fg": "#111111",
-    "user_bubble": "#2B2B2B",
-    "reason_bg": "#242424",
-    "code_bg": "#151515",
+    "link": "#AFC9FF",
+    "hover": "#293242",
+    "selected": "#344159",
+    "accent": "#D5E1F8",
+    "accent_hover": "#ECF3FF",
+    "accent_soft": "#2B364A",
+    "mode_active": "#D5E1F8",
+    "mode_active_fg": "#172238",
+    "checkbox_fill": "#426093",
+    "primary_fg": "#172238",
+    "user_bubble": "#293549",
+    "reason_bg": "#202733",
+    "code_bg": "#141923",
     "danger": "#F97066",
     "danger_soft": "#3A2426",
     "success": "#32D583",
@@ -68,10 +73,10 @@ SIDEBAR_MIN_WIDTH = 220
 RAIL_SIDEBAR_WIDTH = 56
 MESSAGE_CONTENT_MAX_WIDTH = 820
 
-# Keep message surfaces and thumbnails on the same logical-pixel corner curve.
+# Share the corner radius across messages and thumbnails.
 CHAT_BUBBLE_RADIUS = 14
 
-# Keep Chat and Settings aligned by sharing top-bar height, margins, and padding.
+# Align the Chat and Settings headers.
 RIGHT_HEADER_HEIGHT = 58
 RIGHT_HEADER_MARGINS = (20, 8, 16, 8)
 RIGHT_HEADER_SPACING = 8
@@ -82,11 +87,10 @@ BRAND_BADGE_SIZE = 10
 
 FONT_STACK = '".AppleSystemUIFont", "Helvetica Neue", "PingFang SC"'
 
-
 def colors(theme: str = "light") -> dict[str, str]:
     return THEMES.get(theme, _LIGHT)
 
-
+@lru_cache(maxsize=2)
 def build_qss(theme: str = "light") -> str:
     c = colors(theme)
     arrow = (ASSETS_DIR / "chevron-down.svg").as_posix()
@@ -130,7 +134,7 @@ QWidget#chatWorkspace {{
 }}
 QFrame#composerCard {{
     background: {c['panel']};
-    border: 1px dashed {c['border_strong']};
+    border: 1px solid {c['border_strong']};
     border-radius: 18px;
 }}
 QFrame#sectionCard {{
@@ -176,7 +180,7 @@ QLabel#settingsPageTitle {{
 QLabel#welcomeTitle {{
     color: {c['fg']};
     font-size: 26px;
-    font-weight: 650;
+    font-weight: 700;
 }}
 QLabel#welcomeKicker {{
     color: {c['fg_muted']};
@@ -187,7 +191,7 @@ QLabel#welcomeKicker {{
 QLabel#sectionTitle {{
     color: {c['fg']};
     font-size: 15px;
-    font-weight: 650;
+    font-weight: 700;
 }}
 QLabel#subText, QLabel#hintLabel, QLabel#timeLabel, QLabel#metaLabel {{
     color: {c['fg_sub']};
@@ -269,6 +273,7 @@ QPushButton#thinkingBtn, QPushButton#searchBtn {{
 QPushButton#thinkingBtn:checked, QPushButton#searchBtn:checked {{
     color: {c['accent']};
     background: {c['accent_soft']};
+    border-color: {c['selected']};
 }}
 QToolButton#attachBtn {{
     background: {c['accent_soft']};
@@ -304,7 +309,7 @@ QPushButton#settingsNavBtn:checked {{
     background: {c['accent_soft']};
     border-color: {c['selected']};
 }}
-/* Sidebar entry and settings exit share one hover-only surface. */
+/* Share the settings entry and exit surface. */
 QPushButton#sidebarFooterBtn, QPushButton#settingsBackBtn {{
     color: {c['entry_fg']};
     background: transparent;
@@ -417,6 +422,11 @@ QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover,
 QPlainTextEdit:hover {{ border-color: {c['fg_muted']}; }}
 QComboBox:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
 QPlainTextEdit:focus {{ border-color: {c['accent']}; }}
+QLineEdit#searchInfo {{
+    color: {c['fg_sub']};
+    background: {c['reason_bg']};
+    border-color: {c['border']};
+}}
 QPlainTextEdit#systemPromptEdit {{
     border-radius: 12px;
     padding: 12px 14px;
@@ -517,8 +527,8 @@ QCheckBox::indicator {{
     background: {c['panel']};
 }}
 QCheckBox::indicator:checked {{
-    background: {c['accent']};
-    border-color: {c['accent']};
+    background: {c['checkbox_fill']};
+    border-color: {c['checkbox_fill']};
     image: url({check});
 }}
 QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px; }}
@@ -532,7 +542,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{ background: transparent; height: 9px; }}
 QScrollBar::handle:horizontal {{ background: {c['border_strong']}; border-radius: 4px; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-/* Paint menus opaquely to avoid macOS vibrancy. */
+/* Use opaque Qt menus on macOS. */
 QMenu {{
     color: {c['fg']};
     background: {c['panel']};

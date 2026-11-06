@@ -15,7 +15,7 @@ from app.markdown import (
     render_body,
     to_html,
 )
-
+from app.ui.theme import colors
 
 class MarkdownTests(unittest.TestCase):
     STREAMED_DOCUMENT = (
@@ -41,8 +41,6 @@ class MarkdownTests(unittest.TestCase):
     )
 
     def test_streamed_render_matches_a_single_full_render(self) -> None:
-        """Every prefix of a streamed answer must render byte-identically."""
-
         renderer = StreamingMarkdown()
         checked = 0
         for size in range(1, len(self.STREAMED_DOCUMENT) + 1, 7):
@@ -239,8 +237,8 @@ class MarkdownTests(unittest.TestCase):
 
     def test_dark_formula_markup_uses_dark_palette_without_raster_resources(self) -> None:
         rendered = to_html(r"\[x^2+y^2=z^2\]", dark=True)
-        self.assertIn("#F2F2F2", rendered)
-        self.assertIn("#242424", rendered)
+        self.assertIn(colors("dark")["fg"], rendered)
+        self.assertIn(colors("dark")["reason_bg"], rendered)
         self.assertNotRegex(rendered, re.compile(r"data:image|<img|<canvas", re.I))
 
     def test_renders_markdown_tables(self) -> None:
@@ -257,7 +255,6 @@ class MarkdownTests(unittest.TestCase):
         )
         self.assertIn("[1]", rendered)
         self.assertIn('<a href="https://example.com/a">官方说明</a>', rendered)
-
 
 if __name__ == "__main__":
     unittest.main()

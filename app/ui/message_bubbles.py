@@ -61,7 +61,6 @@ from .math_shell import MATH_WEB_SHELL
 from .icons import apply_icon, tint_pixmap
 from .theme import CHAT_BUBBLE_RADIUS, MESSAGE_CONTENT_MAX_WIDTH, colors
 
-
 IMAGE_THUMB_SIZE = 160
 IMAGE_GRID_COLUMNS = 3
 LANE_MAX_WIDTH = MESSAGE_CONTENT_MAX_WIDTH + 63
@@ -70,20 +69,16 @@ KATEX_DIR = ASSETS_DIR / "vendor" / "katex"
 WEB_SURFACE_TEXTURE_LIMIT = 8192
 WEB_SURFACE_MAX_HEIGHT = 6000
 
-
 _MATH_WEB_SHELL = MATH_WEB_SHELL
 
-
 class _MathPage(QWebEnginePage):
-    """Keep generated content local and hand user-clicked links to the OS."""
-
+    # Restrict embedded content and open clicked links externally.
     def acceptNavigationRequest(self, url, navigation_type, is_main_frame) -> bool:
         if navigation_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
             if url.scheme().lower() in {"http", "https", "mailto"}:
                 QDesktopServices.openUrl(url)
             return False
         return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
-
 
 class _MathBridge(QObject):
     layoutReported = Signal(int, int)
@@ -120,7 +115,6 @@ class _MathBridge(QObject):
     def finishSelectionDrag(self) -> None:
         self.selectionDragFinished.emit()
 
-
 class _MathWebView(QWebEngineView):
     contentHeightChanged = Signal(int)
     contentRendered = Signal()
@@ -141,7 +135,7 @@ class _MathWebView(QWebEngineView):
         self._offset = 0
         self._stream_started = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        # RichText positions tiles explicitly, so this view must remain resizable.
+        # RichText sizes each tile explicitly.
         self.setMinimumHeight(1)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setCursor(Qt.CursorShape.IBeamCursor)
@@ -191,14 +185,10 @@ class _MathWebView(QWebEngineView):
 
     @property
     def document_height(self) -> int:
-        """Natural height of the whole rendered answer, in logical pixels."""
-
         return max(0, self._document_height)
 
     @property
     def changed_top(self) -> int:
-        """Document y where this tile's DOM last changed."""
-
         return max(0, self._changed_top)
 
     @property
@@ -214,8 +204,6 @@ class _MathWebView(QWebEngineView):
         code_tail: str = "",
         offset: int | None = None,
     ) -> None:
-        """Replace this tile's whole document."""
-
         if self._disposed:
             return
         self._generation += 1
@@ -241,12 +229,10 @@ class _MathWebView(QWebEngineView):
         code_tail: str = "",
         composed_stable: str = "",
     ) -> None:
-        """Append newly frozen HTML and swap the live tail of this tile."""
-
         if self._disposed:
             return
         if self._pending_document is not None or not self._stream_started:
-            # The document has not been painted yet; fold the growth into it.
+            # Merge changes into the pending document.
             pending = self._pending_document
             if pending is not None:
                 pending["stable"] = composed_stable or (
@@ -269,8 +255,6 @@ class _MathWebView(QWebEngineView):
         self._run(script)
 
     def set_offset(self, offset: int) -> None:
-        """Show rows ``[offset, offset + height)`` of the document."""
-
         if self._disposed:
             return
         offset = int(offset)
@@ -353,7 +337,7 @@ class _MathWebView(QWebEngineView):
         if self._disposed:
             return
         if height <= 1 and self._document_height <= 1:
-            # Ignore an initial empty body report until the document call lands.
+            # Ignore layout reports before the first document.
             return
         self._document_height = max(1, int(height))
         self._changed_top = max(0, int(changed_top))
@@ -364,8 +348,7 @@ class _MathWebView(QWebEngineView):
         )
 
     def _surface_height_limit(self) -> int:
-        """Return this screen's largest GPU-safe logical surface height."""
-
+        # Cap each surface at the GPU-safe height.
         screen = self.screen() or QGuiApplication.primaryScreen()
         ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
         return max(
@@ -429,8 +412,6 @@ class _MathWebView(QWebEngineView):
             page.triggerAction(QWebEnginePage.WebAction.Unselect)
 
     def contextMenuEvent(self, event) -> None:
-        """Flat menu with the standard actions Chromium offers in-page."""
-
         page = self.page()
         if self._disposed or page is None:
             return
@@ -471,8 +452,6 @@ class _MathWebView(QWebEngineView):
             page.runJavaScript("window.refreshDeepSeekLayout()")
 
     def dispose(self) -> None:
-        """Stop callbacks and discard the renderer before deferred deletion."""
-
         if self._disposed:
             return
         self._finish_selection_drag()
@@ -507,17 +486,13 @@ class _MathWebView(QWebEngineView):
                 pass
         self.deleteLater()
 
-
 def _chat_view_for(widget: QWidget) -> ChatView | None:
     ancestor = widget.parentWidget()
     while ancestor is not None and not isinstance(ancestor, ChatView):
         ancestor = ancestor.parentWidget()
     return ancestor
 
-
 class MessageTextBrowser(QTextBrowser):
-    """Read-only message text whose right-click menu stays a flat panel."""
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.IBeamCursor)
@@ -583,10 +558,7 @@ class MessageTextBrowser(QTextBrowser):
         elif chosen is select_all_action:
             self.selectAll()
 
-
 class _RevealCurtain(QWidget):
-    """Paint the soft gradient edge of newly revealed answer text."""
-
     MIN_BAND = 42
     MAX_BAND = 260
 
@@ -631,10 +603,8 @@ class _RevealCurtain(QWidget):
         painter.fillRect(self.rect(), gradient)
         painter.end()
 
-
 def _surface_height_limit(widget: QWidget) -> int:
-    """Return the largest GPU-safe logical surface height for a widget."""
-
+    # Cap each surface at the GPU-safe height.
     screen = widget.screen() or QGuiApplication.primaryScreen()
     ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
     return max(
@@ -645,16 +615,10 @@ def _surface_height_limit(widget: QWidget) -> int:
         ),
     )
 
-
 def _needs_web_renderer(html: str) -> bool:
-    """True when a body needs KaTeX or a code toolbar from Chromium."""
-
     return "data-tex=" in html or "data-code-block=" in html
 
-
 def _split_rendered_html(rendered: str) -> tuple[str, str]:
-    """Split a :func:`to_html` payload into its style block and inner body."""
-
     marker = '<div class="markdown-body">'
     index = rendered.find(marker)
     if index < 0:
@@ -665,22 +629,20 @@ def _split_rendered_html(rendered: str) -> tuple[str, str]:
         remainder = remainder[:end]
     return rendered[:index], remainder
 
-
 class RichText(QWidget):
-    """Fast QTextBrowser for ordinary text, KaTeX web layout only when needed."""
-
+    # Use Chromium for formulas and code controls.
     heightChanged = Signal()
     revealFinished = Signal()
 
-    # The host animates the reveal frontier and curtain without repainting Chromium each frame.
+    # Animate the reveal outside Chromium.
     REVEAL_CATCH_UP = 0.16
     REVEAL_MIN_STEP_PX = 2.0
-    # This cap keeps the reveal responsive while following the newest text.
+    # Cap catch-up speed.
     REVEAL_MAX_STEP_PX = 130.0
-    # This allowance keeps motion smooth while the DOM updates in batches.
+    # Allow for batched DOM updates.
     REVEAL_SETTLE_ALLOWANCE = 700.0
     REVEAL_BAND_PER_PIXEL = 2.5
-    # Keep the DOM slightly ahead of the frontier so each display frame advances smoothly.
+    # Render ahead of the reveal frontier.
     STREAM_RENDER_INTERVAL_MS = 16
 
     def __init__(self, parent=None) -> None:
@@ -741,8 +703,6 @@ class RichText(QWidget):
         self.setFixedHeight(22)
 
     def dispose(self) -> None:
-        """Retire timers and Chromium surfaces before deletion."""
-
         if self._disposed:
             return
         self._disposed = True
@@ -758,13 +718,10 @@ class RichText(QWidget):
             self._text_view.clear_selection()
 
     def document(self) -> QTextDocument:
-        """Retain the former QTextBrowser API for non-math callers and tests."""
-
+        # Expose the native text document for selection and tests.
         return self._text_view.document()
 
     def set_theme(self, dark: bool) -> None:
-        """Track the palette; re-rendering happens on the next set_html."""
-
         theme = "dark" if dark else "light"
         if theme == self._theme:
             return
@@ -778,26 +735,18 @@ class RichText(QWidget):
 
     @property
     def tile_count(self) -> int:
-        """How many GPU-safe surfaces currently paint this message."""
-
         return len(self._tiles)
 
     @property
     def tile_height(self) -> int:
-        """Maximum height of one painted surface, in logical pixels."""
-
         return self._tile_height()
 
     @property
     def document_height(self) -> int:
-        """Natural height of the whole answer, reached or not."""
-
         return self._document_extent()
 
     @property
     def front_height(self) -> int:
-        """Document y of the reveal frontier."""
-
         return max(0, round(self._frontier))
 
     @property
@@ -806,14 +755,10 @@ class RichText(QWidget):
 
     @property
     def frontier(self) -> float:
-        """Document y the reveal has uncovered so far."""
-
         return float(self._frontier)
 
     @property
     def revealed_fraction(self) -> float:
-        """Fraction of the buffered answer that is already on screen."""
-
         if not self._reveal_active:
             return 1.0
         extent = max(1, self._document_extent())
@@ -825,8 +770,6 @@ class RichText(QWidget):
         reveal_characters: int | None = None,
         reveal_total_characters: int | None = None,
     ) -> None:
-        """Show a finished body and optionally preserve the legacy fade-in API."""
-
         if self._disposed:
             return
         self._stop_timers()
@@ -849,7 +792,7 @@ class RichText(QWidget):
         self._document_height = 0
         self._changes_from = 0
         if self._uses_math:
-            # History bodies are fully visible once their WebEngine surface paints.
+            # Show history in a single paint.
             self._reveal_active = False
             self._rebuild_web()
             return
@@ -861,8 +804,6 @@ class RichText(QWidget):
         self._schedule_fit()
 
     def set_reveal_characters(self, characters: int | None) -> None:
-        """Legacy hook: finish the reveal or hide the curtain."""
-
         if self._disposed:
             return
         if characters is None:
@@ -875,8 +816,6 @@ class RichText(QWidget):
 
     # Buffered streaming.
     def begin_stream(self) -> None:
-        """Start an answer whose text arrives through :meth:`stream_text`."""
-
         if self._disposed:
             return
         self._stop_timers()
@@ -904,8 +843,6 @@ class RichText(QWidget):
             self._reveal_timer.start()
 
     def stream_text(self, source: str) -> None:
-        """Buffer model output; rendering and revealing follow on their own."""
-
         if self._disposed:
             return
         if not self._streaming:
@@ -916,8 +853,6 @@ class RichText(QWidget):
             self._stream_timer.start()
 
     def complete_stream(self) -> None:
-        """Mark the buffer final and let the reveal drain what is left."""
-
         if self._disposed:
             return
         self._finished = True
@@ -931,13 +866,10 @@ class RichText(QWidget):
 
     # Reveal animation.
     def _reveal_limit(self) -> float:
-        """Document y the frontier may reach, fade allowance included."""
-
         return self._document_extent() + self.REVEAL_SETTLE_ALLOWANCE
 
     def _advance_reveal(self) -> None:
-        """Move the frontier one display frame forward and resize the body."""
-
+        # Advance the reveal frontier by one frame.
         if self._disposed or not self._reveal_active:
             self._reveal_timer.stop()
             return
@@ -955,7 +887,7 @@ class RichText(QWidget):
             if self._uses_math and self._document_height <= 1 and (
                 self._stable_html or self._tail_html
             ):
-                # Wait for a real DOM measurement so a zero-height page cannot collapse the lane.
+                # Wait for the first valid DOM height.
                 self._reveal_timer.start()
                 return
             self._finish_reveal()
@@ -963,8 +895,6 @@ class RichText(QWidget):
         self._reveal_timer.start()
 
     def _apply_reveal_geometry(self) -> None:
-        """Expose the revealed slice and park the fade curtain on its edge."""
-
         extent = self._document_extent()
         visible = int(max(0.0, min(float(extent), self._frontier)))
         self._set_content_height(max(22, visible))
@@ -984,15 +914,11 @@ class RichText(QWidget):
         return max(0, int(document.size().height() + 3))
 
     def _document_extent(self) -> int:
-        """Height of the whole answer, in document pixels."""
-
         if self._uses_math:
             return max(0, self._document_height)
         return self._text_document_height()
 
     def _finish_reveal(self) -> None:
-        """Retire the curtain and expose the finished answer."""
-
         if self._disposed:
             return
         was_active = self._reveal_active
@@ -1001,19 +927,17 @@ class RichText(QWidget):
         self._curtain.hide()
         if self._uses_math:
             if self._renderer.source:
-                # Repaint each surface from the finished source to resolve incomplete batches and formulas.
+                # Resolve partial markup with the final source.
                 self._style_html = self._renderer.style_html()
                 self._stable_html = render_body(self._renderer.source)
                 self._tail_html = ""
-                # Preserve the measured height while Chromium paints the final pass.
+                # Hold the measured height during the final paint.
                 self._rebuild_web(preserve_height=True)
         self._set_content_height(max(22, self._document_extent()))
         if was_active:
             self.revealFinished.emit()
 
     def _update_content_geometry(self) -> None:
-        """Keep the painted surfaces and the curtain aligned with this body."""
-
         width = max(1, self.width())
         self._text_view.setGeometry(0, 0, width, max(1, self.height()))
         tile_height = self._tile_height()
@@ -1038,14 +962,12 @@ class RichText(QWidget):
         return _surface_height_limit(self)
 
     def _flush_stream(self) -> None:
-        """Render buffered output, appending only what has not been shown."""
-
         self._stream_dirty = False
         if self._disposed or not self._streaming:
             return
         delta, code_delta, tail = self._renderer.update(self._source)
         self._style_html = self._renderer.style_html()
-        # Send the live code line as ``codeTail`` so each surface replaces it instead of duplicating it.
+        # Replace the live code line in each tile.
         self._stable_html = self._renderer.composed_stable_html(
             include_code_tail=False
         )
@@ -1067,8 +989,6 @@ class RichText(QWidget):
         self._render_text_stream()
 
     def _render_text_stream(self) -> None:
-        """Repaint the plain-text body from the incremental renderer."""
-
         self._dispose_tiles()
         self._uses_math = False
         self._text_view.show()
@@ -1078,8 +998,6 @@ class RichText(QWidget):
             self._apply_reveal_geometry()
 
     def _rebuild_web(self, *, preserve_height: bool = False) -> None:
-        """Paint the answer with Chromium tiles using the current HTML."""
-
         self._uses_math = True
         self._text_view.hide()
         if not preserve_height:
@@ -1091,8 +1009,7 @@ class RichText(QWidget):
             self._apply_reveal_geometry()
 
     def _sync_tiles(self) -> None:
-        """Grow or shrink the windowed tile stack over the document."""
-
+        # Fit the tile stack to the current document height.
         tile_height = self._tile_height()
         document = max(0, self._document_height)
         needed = (
@@ -1130,7 +1047,7 @@ class RichText(QWidget):
             tile.raise_()
             self._tiles.append(tile)
         if self._repaint_tiles:
-            # Repaint existing surfaces during rebuilds to avoid Chromium page churn.
+            # Reuse existing Chromium surfaces.
             for index, tile in enumerate(self._tiles[:needed]):
                 self._paint_tile(tile, index * tile_height)
         self._repaint_tiles = False
@@ -1157,8 +1074,6 @@ class RichText(QWidget):
         code_delta: str = "",
         code_tail: str = "",
     ) -> None:
-        """Send the newest HTML fragments to every tile that can show them."""
-
         if not self._tiles:
             self._sync_tiles()
             return
@@ -1186,7 +1101,7 @@ class RichText(QWidget):
         if changed_top > self._changes_from:
             self._changes_from = changed_top
         if document_height > self._document_height:
-            # Keep the tallest layout report because the answer only grows.
+            # Keep the largest streamed layout height.
             self._document_height = document_height
             self._sync_tiles()
             if not self._reveal_active:
@@ -1217,10 +1132,7 @@ class RichText(QWidget):
         self._update_content_geometry()
         self._schedule_fit()
 
-
 class ThinkingIndicator(QWidget):
-    """Rotating progress glyph shown while a reply is still thinking."""
-
     RADIUS = 6.4
     STROKE = 2.0
     ARC_SWEEP = -104.0
@@ -1274,8 +1186,6 @@ class ThinkingIndicator(QWidget):
         painter.end()
 
     def _paint_arc(self, painter: QPainter, accent: QColor) -> None:
-        """Draw a tapered ring: faint track plus a bright, trailing head."""
-
         painter.save()
         painter.translate(10.0, 10.0)
         painter.rotate(self._angle)
@@ -1304,28 +1214,22 @@ class ThinkingIndicator(QWidget):
         painter.drawArc(rect, 90 * 16, int(self.ARC_SWEEP * 16))
         painter.restore()
 
-
 _PREVIEW_SENTENCE_TERMINATORS = frozenset("。！？!?")
 _PREVIEW_SENTENCE_CLOSERS = frozenset("”’\"'）)]】》」』〉»›")
 
-
 def _extract_complete_sentences(text: str) -> list[str]:
-    """Return complete thought sentences while leaving a streaming tail out."""
-
+    # Leave the unfinished sentence in the streaming tail.
     source = str(text or "")
     return [
         source[start:end]
         for start, end in _sentence_spans(source)
     ]
 
-
 def _sentence_spans(
     text: str,
     *,
     include_streaming_tail: bool = False,
 ) -> list[tuple[int, int]]:
-    """Return sentence-aligned source ranges, including an optional live tail."""
-
     source = str(text or "")
     spans: list[tuple[int, int]] = []
     start = 0
@@ -1343,7 +1247,7 @@ def _sentence_spans(
                 next_index += 1
             next_character = source[next_index] if next_index < length else ""
             prefix = source[start:index].strip()
-            # Decimal dots, version dots, and numbered-list markers are not sentence boundaries here.
+            # Keep decimal, version, and list dots within a sentence.
             is_terminator = (
                 next_index >= length
                 or next_character.isspace()
@@ -1379,10 +1283,7 @@ def _sentence_spans(
             spans.append((tail_start, tail_end))
     return spans
 
-
 class ThinkingPreview(QWidget):
-    """Show sentence-aligned reasoning windows in a 60 fps faded ticker."""
-
     FRAME_INTERVAL_MS = 16
     TYPING_DURATION_MS = 500
     CYCLE_DURATION_MS = 1000
@@ -1426,7 +1327,7 @@ class ThinkingPreview(QWidget):
         return self._current_sentence[: self._visible_characters]
 
     def set_reasoning(self, reasoning: str) -> None:
-        # Keep the preview on one line while preserving the raw streaming tail.
+        # Flatten only the preview text.
         source = " ".join(str(reasoning or "").split())
         if source == self._reasoning_text:
             return
@@ -1465,8 +1366,6 @@ class ThinkingPreview(QWidget):
         self._rebuild_segments()
 
     def _rebuild_segments(self) -> None:
-        """Pack visual windows without starting one inside a sentence."""
-
         source = self._reasoning_text
         old_start = (
             self._segment_starts[self._current_index]
@@ -1486,7 +1385,7 @@ class ThinkingPreview(QWidget):
             return
 
         metrics = QFontMetricsF(self.font())
-        # Include the fade region so final characters remain under the gradient.
+        # Include the fade region in text measurement.
         max_width = max(1.0, float(self.width())) + self.FADE_WIDTH
         segments: list[str] = []
         starts: list[int] = []
@@ -1514,7 +1413,7 @@ class ThinkingPreview(QWidget):
         self._sentences = segments
         self._segment_starts = starts
         if starts:
-            # Keep the current window stable across new chunks and resizes.
+            # Keep the current preview window stable.
             index = 0
             for candidate, candidate_start in enumerate(starts):
                 if candidate_start <= old_start:
@@ -1569,7 +1468,7 @@ class ThinkingPreview(QWidget):
                     )
                 ),
             )
-            # Do not retract characters already painted when a streaming window grows.
+            # Retain already revealed characters as the window grows.
             visible = max(self._visible_characters, target_visible)
         else:
             visible = len(self._current_sentence)
@@ -1617,7 +1516,6 @@ class ThinkingPreview(QWidget):
 
     def sizeHint(self) -> QSize:
         return QSize(120, 20)
-
 
 class ReasoningPanel(QFrame):
     heightChanged = Signal()
@@ -1691,13 +1589,11 @@ class ReasoningPanel(QFrame):
             self.indicator.stop()
             self.toggle.setText("已完成深度思考")
             self.preview.stop()
-            # Keep the preview slot reserved so the header controls do not shift when it is empty.
+            # Reserve the preview slot to keep the header stable.
             self.preview.show()
         self._refresh_arrow()
 
     def set_running_label(self, text: str) -> None:
-        """Keep the old string-based API while making the phase explicit."""
-
         phase = (
             self.SEARCHING_PHASE
             if str(text).strip().startswith("正在联网搜索")
@@ -1706,8 +1602,6 @@ class ReasoningPanel(QFrame):
         self.set_phase(phase)
 
     def set_phase(self, phase: str) -> None:
-        """Set the current running operation without changing completion state."""
-
         self._phase = (
             phase if phase in self._RUNNING_LABELS else self.THINKING_PHASE
         )
@@ -1738,10 +1632,7 @@ class ReasoningPanel(QFrame):
         )
         self._refresh_arrow()
 
-
 class OpenImageLabel(QLabel):
-    """Clickable image surface whose rounded image and border are composited."""
-
     def __init__(
         self,
         path: str,
@@ -1771,7 +1662,7 @@ class OpenImageLabel(QLabel):
             background_color=palette["canvas"],
         )
         super().setPixmap(self._thumbnail)
-        # The thumbnail already owns its border; a second stylesheet stroke can cover antialiased corners.
+        # Keep the thumbnail border in the pixmap.
         self.setStyleSheet("background:transparent;border:none;")
         self.update()
 
@@ -1797,14 +1688,12 @@ class OpenImageLabel(QLabel):
             return
         super().mouseReleaseEvent(event)
 
-
 def _image_label(
     path: str,
     parent=None,
     size: int = IMAGE_THUMB_SIZE,
 ) -> OpenImageLabel:
     return OpenImageLabel(path, parent, size)
-
 
 class MessageBubble(QWidget):
     role = "base"
@@ -1819,8 +1708,6 @@ class MessageBubble(QWidget):
         return self._plain
 
     def dispose(self) -> None:
-        """Release expensive child surfaces before the bubble is deleted."""
-
         self._disposed = True
 
     def clear_selection(self) -> None:
@@ -1828,7 +1715,6 @@ class MessageBubble(QWidget):
 
     def apply_theme(self, theme: str) -> None:
         self._theme = theme
-
 
 class UserBubble(MessageBubble):
     role = "user"
@@ -1917,7 +1803,6 @@ class UserBubble(MessageBubble):
     def clear_selection(self) -> None:
         if hasattr(self, "text_view"):
             self.text_view.clear_selection()
-
 
 class AssistantBubble(MessageBubble):
     role = "assistant"
@@ -2030,8 +1915,6 @@ class AssistantBubble(MessageBubble):
         self.apply_theme(theme)
 
     def dispose(self) -> None:
-        """Stop timers and retire any embedded WebEngine renderers."""
-
         if self._disposed:
             return
         self._disposed = True
@@ -2057,7 +1940,7 @@ class AssistantBubble(MessageBubble):
             else ReasoningPanel.THINKING_PHASE
         )
         if self.reasoning_panel is not None:
-            # Restart the panel for each fresh status phase after a tool-call preamble.
+            # Restart the panel when the tool phase changes.
             self.reasoning_panel.set_phase(self._operation_phase)
             self.reasoning_panel.set_running(True)
             if self.status_row.isVisible():
@@ -2065,7 +1948,7 @@ class AssistantBubble(MessageBubble):
                 self.layoutHeightChanged.emit()
             return
 
-        # Standard mode still exposes web-search progress even without reasoning content.
+        # Show search progress in standard mode.
         label = (
             "正在联网搜索"
             if self._operation_phase == ReasoningPanel.SEARCHING_PHASE
@@ -2116,8 +1999,6 @@ class AssistantBubble(MessageBubble):
             self.layoutHeightChanged.emit()
 
     def set_content(self, content: str) -> None:
-        """Buffer model output; the reveal reads it back out on its own."""
-
         if self._disposed:
             return
         self._plain = content
@@ -2129,8 +2010,6 @@ class AssistantBubble(MessageBubble):
         self.content_view.stream_text(content)
 
     def _render_content(self) -> None:
-        """Paint a finished (or history) body in one pass."""
-
         if self._disposed or not self._content_dirty:
             return
         self._content_dirty = False
@@ -2142,8 +2021,6 @@ class AssistantBubble(MessageBubble):
 
     @Slot()
     def _on_reveal_finished(self) -> None:
-        """The newest text has fully emerged; expose the message actions."""
-
         if self._disposed:
             return
         self.content_view.setVisible(bool(self._plain))
@@ -2210,7 +2087,6 @@ class AssistantBubble(MessageBubble):
             self.reasoning_panel.apply_theme(theme)
         apply_icon(self.copy_button, "copy", palette["fg_sub"], 17)
 
-
 class ErrorBubble(MessageBubble):
     role = "error"
 
@@ -2239,7 +2115,6 @@ class ErrorBubble(MessageBubble):
         super().apply_theme(theme)
         palette = colors(theme)
         self.message.setStyleSheet(f"color:{palette['danger']};")
-
 
 class ChatView(QScrollArea):
     followChanged = Signal(bool)
@@ -2300,8 +2175,6 @@ class ChatView(QScrollArea):
         self._set_follow_output(True)
 
     def dispose(self) -> None:
-        """Retire message renderers before the top-level window is destroyed."""
-
         self.clear()
 
     def _add(self, bubble: MessageBubble) -> MessageBubble:
@@ -2385,8 +2258,6 @@ class ChatView(QScrollArea):
             bubble.setFixedWidth(width)
 
     def set_bottom_inset(self, inset: int) -> None:
-        """Leave trailing space below the final message."""
-
         left, top, right, _bottom = self.messages.getContentsMargins()
         bottom = max(18, int(inset))
         if bottom == _bottom:
@@ -2395,8 +2266,6 @@ class ChatView(QScrollArea):
         self.scroll_to_bottom()
 
     def set_composer_clearance(self, clearance: int) -> None:
-        """Reserve a viewport lane for the bottom composer."""
-
         bottom = max(0, int(clearance))
         margins = self.viewportMargins()
         if margins.bottom() == bottom:
@@ -2417,8 +2286,6 @@ class ChatView(QScrollArea):
         self.scroll_to_bottom()
 
     def set_layout_transition_active(self, active: bool) -> None:
-        """Reflow rich messages once after a sidebar width transition."""
-
         active = bool(active)
         if active == self._layout_transition_active:
             return
@@ -2454,14 +2321,10 @@ class ChatView(QScrollArea):
         self.followChanged.emit(enabled)
 
     def pause_follow(self) -> None:
-        """Pause streaming auto-scroll after a user navigates upward."""
-
         if self._bubbles:
             self._set_follow_output(False)
 
     def resume_follow(self) -> None:
-        """Resume auto-scroll and reveal the newest generated content."""
-
         self._set_follow_output(True)
         bar = self.verticalScrollBar()
         distance = bar.maximum() - bar.value()
@@ -2596,7 +2459,7 @@ class ChatView(QScrollArea):
                 self._catch_up_active = False
         else:
             distance = maximum - current
-            # Match content growth so the newest text stays pinned to the viewport bottom.
+            # Follow the newest text as it grows.
             step = max(growth, min(140, max(1, ceil(distance * 0.42))))
             target = current + step
         self._programmatic_scroll = True
